@@ -315,7 +315,8 @@ pub fn ensure_entrypoint() -> Result<(), SupervisorError> {
     }
     Err(SupervisorError(format!(
         "miroir must run as the container's entrypoint under tini, because reset kills every \
-         other process in the container (PID 1 here is '{init}')"
+         other process in the container (PID 1 here is '{init}'); in a VM, give it a PID \
+         namespace of its own: unshare --pid --fork --mount-proc tini -- miroir run"
     )))
 }
 

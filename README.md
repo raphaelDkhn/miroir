@@ -115,7 +115,8 @@ played by a model, and clock `events`. Every field is in the
 [manifest](docs/src/reference/manifest.md) and [task](docs/src/reference/task.md) references, and
 [fixtures/](fixtures) has full examples for Postgres, MySQL and several apps.
 [examples/gitea](examples/gitea) makes the stock Gitea image an env, with twelve tasks for an
-engineering manager's agent and a GRPO training script. Run `miroir check` until it passes: it replays each golden run, an empty submit, repeats and probes, and checks that
+engineering manager's agent, a GRPO training script, and RL on Prime Intellect's Hosted
+Training. Run `miroir check` until it passes: it replays each golden run, an empty submit, repeats and probes, and checks that
 the env idles, resets cleanly and writes only to its state.
 Runs that call `run_code` need a sandbox: [sandbox/check.sh](sandbox/check.sh) runs the check
 beside one.

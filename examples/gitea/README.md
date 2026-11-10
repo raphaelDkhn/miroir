@@ -18,6 +18,8 @@ Gitea's database, and on the emails and webhook calls Gitea sent.
 | [`seed.py`](seed.py) | Orbit's organization, created through Gitea's API, then dated |
 | [`tasks/`](tasks) | the twelve tasks |
 | [`train.py`](train.py) | GRPO training with TRL |
+| [`rl.toml`](rl.toml) | RL training on Prime Intellect's Hosted Training |
+| [`prime_sandbox.py`](prime_sandbox.py) | the `miroir pool` command that runs the env as Prime sandboxes |
 
 ## Orbit
 
@@ -153,6 +155,43 @@ python examples/gitea/train.py --urls urls.txt
 ```
 
 Each episode's record goes to `traces/`.
+
+### Train on Prime Intellect
+
+[`rl.toml`](rl.toml) trains Qwen3.5-9B with Prime Intellect's
+[Hosted Training](https://docs.primeintellect.ai/hosted-training/hosted-rl): Prime runs the
+trainer, the inference server and the env's [verifiers](../../docs/src/train/verifiers.md)
+adapter, and each rollout leases a container in a pool of
+[Prime sandboxes](../../docs/src/run/pool.md#on-prime-intellect). With the `prime` CLI logged
+in and the `verifiers` extra installed:
+
+```sh
+# The env's image, built on Prime for its VMs
+prime images push gitea-env:0.1 --context examples/gitea --dockerfile examples/gitea/Dockerfile.miroir
+# The adapter, on the Environments Hub as <you>/miroir-verifiers
+python python/push_hub.py
+# A sandbox per rollout in flight (rl.toml's max_inflight), each at a public URL that only
+# the token guards
+export MIROIR_TOKEN=$(openssl rand -hex 24)
+miroir pool --size 40 --urls urls.txt -- \
+  python examples/gitea/prime_sandbox.py prime/<you>/gitea-env:0.1
+```
+
+Once the pool is ready, set `env.taskset.id` in `rl.toml` to your Hub id. Prime passes no
+variables to a full-parameter run's env, so append the pool's URLs and token to a copy of the
+config, whose last table is the env's source, and dispatch it:
+
+```sh
+{ cat examples/gitea/rl.toml
+  python -c 'import json, miroir; print("env.taskset.urls =", json.dumps(miroir.read_urls("urls.txt")))'
+  echo "env.taskset.token = \"$MIROIR_TOKEN\""
+} > rl.local.toml
+prime train rl.local.toml
+```
+
+The run trains on two RTX PRO 6000 GPUs and serves the policy on a third. It knows the URLs it
+started with, so keep the pool running until the run ends, and stop it after. The run's config
+and logs hold the pool's token, which is why each pool gets a token of its own.
 
 ### Let the agent write code
 

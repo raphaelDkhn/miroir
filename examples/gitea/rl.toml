@@ -1,0 +1,56 @@
+# Hosted RL on Prime Intellect: Qwen3.5-9B learns the Gitea env's train split, each rollout in a
+# sandbox of the pool. README.md, "Train on Prime Intellect", has the steps. The pool's URLs and
+# token are appended to the source table, which comes last, at dispatch.
+mode = "rl"
+name = "gitea-qwen3.5-9b"
+max_steps = 40
+# A whole episode is one sample: every turn and every API response, which Gitea makes long.
+seq_len = 32768
+gpu_type = "RTX_PRO_6000B_96GB"
+
+[model]
+name = "Qwen/Qwen3.5-9B"
+
+[deployment]
+num_train_gpus = 2
+num_infer_gpus = 1
+
+[trainer.optim]
+lr = 1e-6
+
+[inference]
+
+[orchestrator]
+# Eight rollouts of each of the five learnable tasks (below) a step.
+batch_size = 40
+
+[orchestrator.concurrency]
+# One container per rollout in flight: the size of the pool. Without a start, the orchestrator
+# starts at the KV cache over Qwen3.5's 262K context, 7, and ramps up slowly; an episode fits
+# in seq_len, so the pool's 40 fit.
+initial_inflight = 40
+max_inflight = 40
+
+[orchestrator.renderer]
+name = "qwen3.5"
+enable_thinking = false
+
+[orchestrator.train]
+group_size = 8
+
+[orchestrator.train.sampling]
+max_completion_tokens = 4096
+
+[[orchestrator.train.source]]
+name = "gitea"
+env.taskset.id = "raphaeldkhn/miroir-verifiers"
+env.taskset.split = "train"
+# Harm (a change the task doesn't allow, or a failed gate) earns less than doing nothing.
+env.taskset.harm_reward = -0.5
+env.taskset.max_seconds = 900
+# The train tasks `miroir calibrate` found learnable for Qwen3.5-9B, at four rollouts each: it
+# solved close-stale-needs-info and grant-contractor-access every time, add-ci-webhook never.
+select.include.ids = [
+  "count-urgent-bugs", "list-stale-prs", "merge-approved-prs", "offboard-engineer",
+  "triage-new-issue",
+]

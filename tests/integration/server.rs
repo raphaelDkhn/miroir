@@ -422,11 +422,15 @@ async fn a_call_for_another_session_or_episode_is_refused() {
     right["episode_id"] = json!("now");
     let done = mcp(&env, "tools/call", &right).await;
     assert_eq!(done["result"]["done"], true, "{done}");
+    let content = done["result"]["content"].as_array().unwrap();
+    assert_eq!(content[0]["text"], json!({"submitted": true}).to_string(), "{done}");
+    let last = content.last().unwrap()["text"].as_str().unwrap();
+    assert!(last.contains("the episode is over; stop calling tools"), "the model is told: {done}");
     let after = mcp(&env, "tools/call", &right).await;
     assert_eq!(after["result"]["isError"], true, "{after}");
     assert_eq!(after["result"]["error"]["error_type"], "execution_error", "{after}");
     let shown = after["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(shown.contains("the episode is done"), "{after}");
+    assert!(shown.contains("the episode is over; stop calling tools"), "{after}");
 }
 
 #[tokio::test]

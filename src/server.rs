@@ -36,6 +36,8 @@ const CONNECTION_LIMIT: usize = 256;
 const MCP_CALL_LIMIT: usize = 8;
 const MEND_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 const MEND_BACKOFF_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
+/// What an MCP client's model reads after the call that ended its episode.
+const LAST_CALL: &str = "That was the last tool call: the episode is over; stop calling tools.";
 
 /// Server state: the env, its bearer token, and the one session it serves at a time.
 pub struct App {
@@ -551,6 +553,11 @@ async fn mcp_call_tool(
         let shown = observation[if is_error { "error" } else { "result" }].to_string();
         json!([{"type": "text", "text": shown}])
     };
+    if envelope["done"] == true
+        && let Some(content) = observation["content"].as_array_mut()
+    {
+        content.push(json!({"type": "text", "text": LAST_CALL}));
+    }
     observation["isError"] = Value::Bool(is_error);
     observation["done"] = envelope["done"].clone();
     observation["reward"] = envelope["reward"].clone();

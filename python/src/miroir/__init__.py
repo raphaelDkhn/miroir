@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from websockets.exceptions import ConnectionClosed, InvalidHandshake
+from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 from websockets.sync.client import ClientConnection, connect
 
 __all__ = [
@@ -58,6 +58,11 @@ class MiroirError(Exception):
         super().__init__(f"{code}: {message}")
         self.code = code
         self.message = message
+
+
+class _Unreachable(Exception):
+    """A container that answered its health check, then failed the session's handshake, as
+    when a gateway before it errs: another container may take the lease, or it may later."""
 
 
 class Session:
@@ -102,7 +107,11 @@ class Session:
                     if health.get("leased"):
                         busy += 1
                         continue
-                    socket = _open_session(url, token)
+                    try:
+                        socket = _open_session(url, token)
+                    except _Unreachable:
+                        down.append(url)
+                        continue
                     if socket is not None:
                         return cls(url, socket)
                     busy += 1
@@ -386,8 +395,12 @@ def _open_session(url: str, token: str | None) -> ClientConnection | None:
             ping_timeout=PING_TIMEOUT_S,
             max_size=None,
         ).__enter__()
+    except InvalidStatus as e:
+        if e.response.status_code < 500:
+            raise MiroirError("CONNECTION_FAILED", f"{ws_url}: {e!r}") from e
+        raise _Unreachable(ws_url) from e
     except (InvalidHandshake, OSError, TimeoutError) as e:
-        raise MiroirError("CONNECTION_FAILED", f"{ws_url}: {e!r}") from e
+        raise _Unreachable(ws_url) from e
     try:
         socket.send(json.dumps({"type": "state"}))
         reply = json.loads(socket.recv(timeout=HTTP_TIMEOUT_S))

@@ -236,6 +236,8 @@ def test_a_dropped_connection_breaks_the_session_for_good(urls):
 class FakeEnv:
     def __init__(self, routes: dict[str, tuple[int, bytes]]) -> None:
         class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
             def do_GET(self) -> None:
                 status, body = routes.get(self.path, (404, b"{}"))
                 self.send_response(status)
@@ -308,6 +310,35 @@ def test_a_lease_opens_no_session_on_a_container_a_session_holds(monkeypatch):
     leased[free] = True
     with pytest.raises(MiroirError, match="2 of 2 containers leased"):
         Session.lease([held, free], wait_busy=False)
+
+
+HEALTHY = b'{"status": "healthy", "leased": false}'
+
+
+def test_a_gateway_error_at_the_handshake_sends_the_lease_to_another_container(monkeypatch):
+    erring = FakeEnv({"/health": (200, HEALTHY), "/ws": (502, b"<html>bad gateway</html>")})
+    free = "http://free:1"
+    monkeypatch.setattr(miroir, "_health", lambda url: json.loads(HEALTHY))
+    real = miroir._open_session
+    monkeypatch.setattr(
+        miroir,
+        "_open_session",
+        lambda url, token: FakeSocket() if url == free else real(url, token),
+    )
+    for _ in range(5):
+        assert Session.lease([erring.url, free], wait_busy=False).url == free
+    with pytest.raises(MiroirError, match="0 of 1 containers leased, 1 not healthy") as refused:
+        Session.lease([erring.url], wait_busy=False, timeout_s=0.5)
+    assert refused.value.code == "NO_FREE_CONTAINER", "retried until the lease's timeout"
+
+
+def test_a_refused_handshake_fails_the_lease_at_once():
+    refusing = FakeEnv({"/health": (200, HEALTHY), "/ws": (401, b'{"detail": "wrong token"}')})
+    started = time.monotonic()
+    with pytest.raises(MiroirError, match="401") as refused:
+        Session.lease([refusing.url], "wrong", wait_busy=True, timeout_s=60)
+    assert refused.value.code == "CONNECTION_FAILED"
+    assert time.monotonic() - started < 10, "a wrong token is no reason to wait"
 
 
 def test_a_lease_reads_its_url_file_again_while_it_waits(monkeypatch, tmp_path):

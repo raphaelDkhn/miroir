@@ -4,8 +4,10 @@ description: >-
   Gitea 28.3, the self-hosted Git forge, holding the engineering organization of Orbit, a
   payments company: six repositories, eight teams, and their issues, pull requests and releases
 processes:
+  # TCP only, with no socket in /run, which a VM such as a Prime sandbox mounts empty at boot.
   - name: db
-    command: [postgres, -D, /var/lib/postgresql/data, -c, listen_addresses=127.0.0.1]
+    command: [postgres, -D, /var/lib/postgresql/data, -c, listen_addresses=127.0.0.1,
+              -c, unix_socket_directories=]
     user: postgres
     datastore: true
     ready: {tcp: 5432}

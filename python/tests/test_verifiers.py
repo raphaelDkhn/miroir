@@ -157,14 +157,15 @@ def test_an_eval_of_the_golden_calls_earns_full_reward(urls, model, tmp_path):
     [trace] = vf_run(urls, model, tmp_path, traces=tmp_path / "miroir")["traces"]
     offered = sorted(tool["function"]["name"] for tool in model.requests[0]["tools"])
     assert offered == ["api_docs", "api_request", "submit"], "Miroir's own tools, by their names"
-    assert model.replies == [], "the model made every call"
+    assert model.replies == [late], "the rollout stopped at submit, before another request"
     assert trace["ok"], trace["errors"]
+    assert trace["stop_condition"] == "episode_over", trace["stop_condition"]
     assert trace["rewards"]["miroir"]["score"] == 1.0
     assert trace["metrics"]["success"] == 1.0
-    assert trace["metrics"]["calls"] == len(calls), "the call after submit never ran"
+    assert trace["metrics"]["calls"] == len(calls)
     assert trace["metrics"]["harm"] == 0.0 and trace["metrics"]["episode_s"] > 0
     shown = [n["message"]["content"] for n in trace["nodes"] if n["message"]["role"] == "tool"]
-    assert "the episode is done" in shown[-1], "a call after submit is a tool error, not a crash"
+    assert "the episode is over; stop calling tools" in str(shown[-1]), "submit says it is over"
     [saved] = list((tmp_path / "miroir").glob("*.jsonl"))
     [record] = [json.loads(line) for line in saved.read_text().splitlines()]
     assert [action["arguments"] for action in record["actions"]] == [c["arguments"] for c in calls]
@@ -295,6 +296,17 @@ def test_a_token_var_that_is_not_set_is_refused(monkeypatch):
         _token(config)
 
 
+def test_a_token_in_the_config_serves_a_run_that_passes_no_variables(monkeypatch):
+    monkeypatch.setenv("MIROIR_TEST_TOKEN", "from-the-variable")
+    given = MiroirTasksetConfig(urls=["http://127.0.0.1:9"], token="pool-token")
+    assert _token(given) == "pool-token"
+    assert "pool-token" not in repr(given), "a config's repr does not show the token"
+    both = MiroirTasksetConfig(token="pool-token", token_var="MIROIR_TEST_TOKEN")
+    with pytest.raises(ValueError, match=r"set one of --env\.taskset\.token and"):
+        _token(both)
+    assert _token(MiroirTasksetConfig(urls=["http://127.0.0.1:9"])) is None
+
+
 @pytest.mark.integration
 def test_an_eval_that_never_submits_is_graded(urls, model, tmp_path):
     model.replies = [{"tool": "api_request", "arguments": {"method": "GET", "path": "/me"}}]
@@ -406,6 +418,10 @@ class FakeLease:
     def __init__(self, coworkers: bool) -> None:
         self.url, self.episode_id, self.coworkers = "http://env:1", "e1", coworkers
         self.reset_with: tuple[Any, ...] = ()
+        self.done = False
+
+    def state(self) -> dict:
+        return {"done": self.done}
 
     def reset(self, task_id: str, max_seconds: int | None = None, coworkers: bool = False) -> dict:
         self.reset_with = (task_id, max_seconds, coworkers)
@@ -497,6 +513,23 @@ def test_a_rollout_hooks_its_task_only_when_its_episode_has_coworkers(monkeypatc
     without = FakeLease(coworkers=False)
     play(without, None)
     assert without.reset_with[2] is False
+
+
+@pytest.mark.parametrize("coworkers", [False, True])
+def test_a_rollout_stops_before_its_next_model_request_once_its_episode_is_over(
+    monkeypatch, coworkers
+):
+    import verifiers.v1 as vf
+
+    monkeypatch.setattr(miroir, "answer_coworkers", lambda lease, model: 0)
+    lease = FakeLease(coworkers=coworkers)
+    [task] = play(lease, CoworkerModel("http://m/v1", "m")).tasks
+    request = vf.Request(messages=[])
+    assert asyncio.run(task.episode_over(request)) is False, "the episode still runs"
+    lease.done = True
+    assert asyncio.run(task.episode_over(request)) is True
+    shared = MiroirTask(vf_data("ask-priya"))
+    assert asyncio.run(shared.episode_over(request)) is False, "the taskset's own copy never stops"
 
 
 def test_a_coworker_failure_fails_the_rollout_once_its_turn_ends(monkeypatch):

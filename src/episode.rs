@@ -293,7 +293,8 @@ impl Env {
             return Err(EnvError::Invalid(message));
         }
         if episode.done {
-            return Err(EnvError::Other("the episode is done; send reset to start another".into()));
+            let message = "the episode is over; stop calling tools, or send reset to start another";
+            return Err(EnvError::Other(message.into()));
         }
         let task = &self.tasks[index];
         let (task_id, world) = (&task.id, &task.world);

@@ -33,6 +33,8 @@ class MiroirTasksetConfig(vf.TasksetConfig):
     urls_file: str | None = None
     split: str = "train"
     token_var: str | None = None
+    # For a run that passes no variables to the env, as Prime's full-FT Hosted Training.
+    token: str | None = Field(default=None, repr=False)
     traces: str | None = None
     calibration: str | None = None
     keep: list[str] = Field(default_factory=lambda: ["learnable"])
@@ -45,7 +47,14 @@ class MiroirTasksetConfig(vf.TasksetConfig):
 
 
 class MiroirTask(vf.Task[vf.TaskData]):
-    """A task of the env, by id."""
+    """A task of the env, by id; a rollout's copy knows when its episode is over."""
+
+    over: Callable[[], Awaitable[bool]] | None = None
+
+    @vf.stop
+    async def episode_over(self, request: vf.Request) -> bool:
+        """Stop before the next model request once the episode is over, as after submit."""
+        return self.over is not None and await self.over()
 
 
 class CoworkerTask(MiroirTask):
@@ -131,6 +140,9 @@ class MiroirEnv(vf.Env[MiroirEnvConfig]):
         if self._coworker is not None and observation["metadata"].get("coworkers"):
             task = CoworkerTask(task.data, task.config)
             task.answer = self._answering(session, self._coworker, failures)
+        else:
+            task = MiroirTask(task.data, task.config)
+        task.over = functools.partial(self._over, session)
         async with agents.player.interaction(task, tools=tools) as interaction:
             await interaction.turn(miroir.prompt(observation, today))
             if failures:
@@ -163,6 +175,9 @@ class MiroirEnv(vf.Env[MiroirEnvConfig]):
                     failures.append(e)
 
         return answer
+
+    async def _over(self, session: Session) -> bool:
+        return bool((await self._call(session.state))["done"])
 
     async def _call(self, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         loop = asyncio.get_running_loop()
@@ -214,8 +229,10 @@ def _coworker(config: MiroirTasksetConfig) -> CoworkerModel | None:
 
 
 def _token(config: MiroirTasksetConfig) -> str | None:
+    if config.token is not None and config.token_var is not None:
+        raise ValueError("set one of --env.taskset.token and --env.taskset.token_var")
     if config.token_var is None:
-        return None
+        return config.token
     token = os.environ.get(config.token_var)
     if not token:
         raise ValueError(f"--env.taskset.token_var names {config.token_var}, which is not set")

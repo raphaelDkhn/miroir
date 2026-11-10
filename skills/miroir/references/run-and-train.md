@@ -168,7 +168,8 @@ vf-run miroir-verifiers -m <model> \
   --env.taskset.urls_file urls.txt --env.taskset.token_var MIROIR_TOKEN --env.taskset.traces traces/
 ```
 
-Options under `--env.taskset.`: `urls` (a JSON list) or `urls_file`, `split`, `token_var`,
+Options under `--env.taskset.`: `urls` (a JSON list) or `urls_file`, `split`, `token_var` (or
+`token`, for a run that passes the env no variables, as Prime's Hosted Training),
 `traces`, `calibration` and `keep`, `harm_reward`, `surface` (`api`, `mcp` or `code`),
 `max_seconds`, and `coworker_model`, `coworker_base_url`, `coworker_api_key_var`. A rollout that
 could not be graded fails with `INVALID_GRADE`. Rollouts in flight are capped at the number of

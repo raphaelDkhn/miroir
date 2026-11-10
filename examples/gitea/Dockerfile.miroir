@@ -19,7 +19,7 @@ RUN for secret in SECRET_KEY INTERNAL_TOKEN JWT_SECRET LFS_JWT_SECRET; do \
       file=/etc/gitea/$(echo "$secret" | tr A-Z a-z) \
       && gitea generate secret "$secret" > "$file" && chown git:git "$file" && chmod 0400 "$file"; \
     done \
- && install -d -o postgres -g postgres /var/lib/postgresql/data /run/postgresql \
+ && install -d -o postgres -g postgres /var/lib/postgresql/data \
  && su postgres -s /bin/sh -c "initdb -D /var/lib/postgresql/data --auth=trust --encoding=UTF8 --locale=C.UTF-8" \
  && install -d -o git -g git /var/lib/gitea \
  && miroir bake

@@ -37,6 +37,29 @@ and passes `MIROIR_TOKEN` through.
 
 It gives up if no container ever becomes healthy, or if the first three starts all fail.
 
+## On Prime Intellect
+
+[`examples/gitea/prime_sandbox.py`](https://github.com/raphaelDkhn/miroir/blob/master/examples/gitea/prime_sandbox.py)
+runs each container as a [Prime sandbox](https://docs.primeintellect.ai/sandboxes/overview),
+from an image that `prime images push` built:
+
+```sh
+export MIROIR_TOKEN=$(openssl rand -hex 24)
+miroir pool --size 32 --urls urls.txt -- \
+  python examples/gitea/prime_sandbox.py prime/<you>/my-env:<tag>
+```
+
+Each sandbox has no egress and publishes port 8000 at
+`https://8000-<sandbox-id>.sandbox-v2-prod.pinfra.io`. Prime does not authenticate that URL,
+so `MIROIR_TOKEN` is all that guards the env, and the script refuses to start without it.
+
+A sandbox is a VM, not a container, which changes two things:
+
+- Each reset kills every process but PID 1 and miroir, so `miroir run` needs a PID namespace
+  of its own: the script starts it with `unshare --pid --fork --mount-proc tini -- miroir run`.
+- `/run` is mounted empty at boot, so a datastore can't use a directory the image made there.
+  Give it a socket elsewhere, or none, as the Gitea example does for Postgres.
+
 ## Using the file
 
 ```python
