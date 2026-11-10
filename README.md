@@ -35,6 +35,21 @@ docker run --rm -d -p 127.0.0.1:8000:8000 -e MIROIR_TOKEN=secret acme-crm-env
 curl -H 'Authorization: Bearer secret' http://127.0.0.1:8000/acme-crm/splits
 ```
 
+## With a coding agent
+
+[`skills/miroir`](skills/miroir/SKILL.md) is an [Agent Skill](https://agentskills.io) that
+teaches coding agents to make an env, write tasks, fix `miroir check` failures, play episodes
+and train on an env. Install it in your agent:
+
+| Agent | Install |
+|---|---|
+| Claude Code | `/plugin install miroir --marketplace raphaelDkhn/miroir` |
+| Codex | `npx skills add raphaelDkhn/miroir -a codex` |
+| Hermes | `hermes skills install raphaelDkhn/miroir/skills/miroir` |
+| others | `npx skills add raphaelDkhn/miroir`, which asks for the agents |
+
+`npx skills` installs into the current project; add `-g` to install for every project.
+
 ## Make an env
 
 Add miroir to the product's image, as in [fixtures/acme-crm/Dockerfile.miroir](fixtures/acme-crm/Dockerfile.miroir):
@@ -204,5 +219,6 @@ cargo test --locked --test integration -- --ignored    # builds the fixture imag
 | `tests/` | Docker integration tests and OpenEnv conformance |
 | `tools/` | reset timing and pool soak benchmarks |
 | `docs/` | the documentation, an mdBook |
+| `skills/` | the Agent Skill for coding agents |
 
 Licensed under [Apache-2.0](LICENSE).

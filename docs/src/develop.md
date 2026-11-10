@@ -11,6 +11,7 @@
 | `tests/` | Docker integration tests, and OpenEnv conformance |
 | `tools/` | reset timing and pool soak benchmarks |
 | `docs/` | this book |
+| `skills/` | the Agent Skill for coding agents |
 
 ## Checks
 
@@ -31,4 +32,16 @@ The docs are an [mdBook](https://rust-lang.github.io/mdBook/) in `docs/`:
 ```sh
 mdbook serve docs    # http://localhost:3000, rebuilt on save
 mdbook build docs    # into docs/book
+```
+
+## The skill
+
+`skills/miroir` restates this book for coding agents, as an
+[Agent Skill](https://agentskills.io): `SKILL.md` holds the workflows, and `references/` the
+fields and the `check` stages. When a change touches the manifest, the task format, the tools or
+`check`, update the skill too. `.claude-plugin/marketplace.json` lists it for Claude Code.
+
+```sh
+uvx --from skills-ref==0.1.1 agentskills validate skills/miroir
+claude plugin validate --strict .
 ```

@@ -71,6 +71,8 @@ jobs:
       - run: echo "$MDBOOK_SHA256  $RUNNER_TEMP/mdbook.tar.gz" | sha256sum -c -
       - run: tar -xzf "$RUNNER_TEMP/mdbook.tar.gz" -C "$RUNNER_TEMP"
       - run: '"$RUNNER_TEMP/mdbook" build docs'
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+      - run: uvx --from skills-ref==0.1.1 agentskills validate skills/miroir
 
   supply-chain:
     runs-on: ubuntu-24.04

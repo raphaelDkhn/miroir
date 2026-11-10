@@ -50,3 +50,9 @@ repos:
         entry: shfmt -d
         language: system
         types: [shell]
+      - id: agentskills
+        name: agentskills validate
+        entry: uvx --from skills-ref==0.1.1 agentskills validate skills/miroir
+        language: system
+        files: ^skills/
+        pass_filenames: false
