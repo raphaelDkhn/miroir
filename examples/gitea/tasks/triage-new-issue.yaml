@@ -1,0 +1,68 @@
+split: train
+instruction: >-
+  A new issue came in on orbit/api: #58, CSV exports crash for merchants with more than 10k
+  transactions. Triage it the usual way: label it kind/bug and priority/p1, drop its
+  status/needs-triage label, put it in the v2.4 milestone, and assign it to whoever owns the
+  code it is about, according to the repository's CODEOWNERS file.
+max_steps: 25
+# Issue 58 is orbit/api#58, milestone 2 is v2.4, and user 7 is Noah, who owns internal/exports/.
+checks:
+  - name: labeled
+    weight: 0.3
+    sql: |
+      SELECT count(*) / 2.0 FROM issue_label il JOIN label l ON l.id = il.label_id
+      WHERE il.issue_id = 58 AND l.name IN ('kind/bug', 'priority/p1')
+  - name: triage_label_gone
+    weight: 0.1
+    sql: |
+      SELECT count(*) = 0 FROM issue_label il JOIN label l ON l.id = il.label_id
+      WHERE il.issue_id = 58 AND l.name = 'status/needs-triage'
+  - name: in_v2_4
+    weight: 0.3
+    sql: SELECT milestone_id = 2 FROM issue WHERE id = 58
+  - name: owner_assigned
+    weight: 0.3
+    sql: SELECT count(*) = 1 AND bool_and(assignee_id = 7) FROM issue_assignees WHERE issue_id = 58
+  - name: only_issue_58
+    gate: true
+    db: episode
+    sql: |
+      SELECT count(*) = 0 FROM changes
+      WHERE (tbl = 'issue' AND json_extract(pk, '$.id') <> 58 AND coalesce(columns, '') <> '["updated_unix"]')
+         OR (tbl IN ('issue_label', 'issue_assignees', 'comment')
+             AND json_extract(coalesce(after, before), '$.issue_id') <> 58
+             AND coalesce(json_extract(after, '$.ref_issue_id'), 0) <> 58)
+allowed_changes:
+  - {table: issue, op: update, columns: [milestone_id, num_comments, updated_unix]}
+  - {table: issue_label, op: insert}
+  - {table: issue_label, op: delete}
+  - {table: issue_assignees, op: insert}
+  - {table: comment, op: insert}
+  - {table: label, op: update, columns: [num_issues, num_closed_issues, updated_unix]}
+  - {table: milestone, op: update, columns: [num_issues, num_closed_issues, completeness, updated_unix]}
+golden:
+  - {tool: api_request, arguments: {method: GET, path: /repos/orbit/api/raw/CODEOWNERS}}
+  - {tool: api_request, arguments: {method: GET, path: "/repos/orbit/api/milestones?state=open"}}
+  - {tool: api_request, arguments: {method: PUT, path: /repos/orbit/api/issues/58/labels, body: {labels: [kind/bug, priority/p1]}}}
+  - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/58, body: {milestone: 2, assignees: [noah]}}}
+  - {tool: submit, arguments: {answer: "Triaged orbit/api#58 and assigned it to Noah."}}
+probes:
+  - name: assigns-the-catch-all-owner
+    steps:
+      - {tool: api_request, arguments: {method: PUT, path: /repos/orbit/api/issues/58/labels, body: {labels: [kind/bug, priority/p1]}}}
+      - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/58, body: {milestone: 2, assignees: [marcus]}}}
+      - {tool: submit, arguments: {}}
+    max_reward: 0.7
+  - name: keeps-the-triage-label
+    steps:
+      - {tool: api_request, arguments: {method: POST, path: /repos/orbit/api/issues/58/labels, body: {labels: [kind/bug, priority/p1]}}}
+      - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/58, body: {milestone: 2, assignees: [noah]}}}
+      - {tool: submit, arguments: {}}
+    max_reward: 0.9
+  - name: triages-a-neighbor-too
+    steps:
+      - {tool: api_request, arguments: {method: PUT, path: /repos/orbit/api/issues/58/labels, body: {labels: [kind/bug, priority/p1]}}}
+      - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/58, body: {milestone: 2, assignees: [noah]}}}
+      - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/7, body: {assignees: [noah]}}}
+      - {tool: submit, arguments: {}}
+    max_reward: 0

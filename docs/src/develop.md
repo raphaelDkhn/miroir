@@ -8,6 +8,7 @@
 | `python/` | the client, the TRL and verifiers adapters, the host-side CLI |
 | `sandbox/` | the image that runs `run_code` commands |
 | `fixtures/` | example products and their envs |
+| `examples/` | real products made envs: Gitea |
 | `tests/` | Docker integration tests, and OpenEnv conformance |
 | `tools/` | reset timing and pool soak benchmarks |
 | `docs/` | this book |

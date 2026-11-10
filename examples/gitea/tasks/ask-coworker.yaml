@@ -1,0 +1,75 @@
+split: validation
+instruction: >-
+  orbit/api#54 says webhook retries never stop once an endpoint answers 410 Gone. Marcus Webb
+  (marcus) worked on webhook retries: ask him on the issue, mentioning @marcus, whether the fix
+  has shipped. If it has, close the issue with a comment naming the release that has it. If it
+  hasn't, put the issue in the v2.4 milestone.
+max_steps: 15
+# Issue 54 is orbit/api#54; users 2 and 3 are Dana and Marcus. Writing "#32" makes Gitea
+# add a reference comment on #32, which the last gate allows. Marcus answers as a model plays
+# him: from comments that mention him, through Gitea's API with his own token.
+coworkers:
+  - name: marcus
+    description: Marcus Webb, staff engineer at Orbit, who owns the API's webhooks (marcus@orbit.test)
+    script: >-
+      You fixed this last month: webhooks stop retrying once an endpoint answers 410 Gone. The
+      fix is orbit/api#32, and it shipped in v2.3.1. Answer in one or two sentences.
+    headers: {gitea: {Authorization: token f59ad98d31d52c646a1c39f9dfb27389c63fe913}}
+    inbox:
+      sql: >-
+        SELECT json_agg(json_build_object('id', c.id, 'text', c.content, 'index', i.index)
+                        ORDER BY c.id)
+        FROM comment c JOIN issue i ON i.id = c.issue_id
+        WHERE i.repo_id = 1 AND c.type = 0 AND c.poster_id = 2 AND c.content ~* '@marcus\M'
+    reply: {method: POST, path: "/repos/orbit/api/issues/{index}/comments", body: {body: "{text}"}}
+checks:
+  - name: closed_after_his_answer
+    weight: 0.6
+    sql: |
+      SELECT bool_and(i.is_closed AND i.closed_unix >= c.created_unix)
+      FROM issue i JOIN comment c ON c.issue_id = i.id AND c.type = 0 AND c.poster_id = 3
+      WHERE i.id = 54
+  - name: named_the_release
+    weight: 0.4
+    sql: |
+      SELECT count(*) >= 1 FROM comment c
+      WHERE c.issue_id = 54 AND c.type = 0 AND c.poster_id = 2 AND c.content ~ '2\.3\.1'
+        AND c.created_unix >= (SELECT min(created_unix) FROM comment
+                               WHERE issue_id = 54 AND type = 0 AND poster_id = 3)
+  - name: milestone_unchanged
+    gate: true
+    sql: SELECT milestone_id = 0 FROM issue WHERE id = 54
+  - name: only_issue_54
+    gate: true
+    db: episode
+    sql: |
+      SELECT count(*) = 0 FROM changes
+      WHERE (tbl = 'issue' AND json_extract(pk, '$.id') <> 54 AND coalesce(columns, '') <> '["updated_unix"]')
+         OR (tbl = 'comment' AND json_extract(after, '$.issue_id') <> 54
+             AND coalesce(json_extract(after, '$.ref_issue_id'), 0) <> 54)
+allowed_changes:
+  - {table: comment, op: insert}
+  - {table: issue, op: update, columns: [is_closed, closed_unix, num_comments, updated_unix]}
+  - {table: label, op: update, columns: [num_closed_issues, updated_unix]}
+  - {table: repository, op: update, columns: [num_closed_issues]}
+golden:
+  - {tool: api_request, arguments: {method: POST, path: /repos/orbit/api/issues/54/comments, body: {body: "@marcus has the fix for this shipped yet?"}}}
+  - {tool: coworker_reply, arguments: {coworker: marcus, text: "Yes: #32 fixed it, and it shipped in v2.3.1."}}
+  - {tool: api_request, arguments: {method: GET, path: /repos/orbit/api/issues/54/comments}}
+  - {tool: api_request, arguments: {method: POST, path: /repos/orbit/api/issues/54/comments, body: {body: "Fixed by #32, which shipped in v2.3.1. Closing."}}}
+  - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/54, body: {state: closed}}}
+  - {tool: submit, arguments: {answer: "Marcus confirmed the fix shipped in v2.3.1; closed orbit/api#54."}}
+probes:
+  - name: closes-without-asking
+    steps:
+      - {tool: api_request, arguments: {method: POST, path: /repos/orbit/api/issues/54/comments, body: {body: "Fixed in v2.3.1. Closing."}}}
+      - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/54, body: {state: closed}}}
+      - {tool: submit, arguments: {}}
+    max_reward: 0
+  - name: schedules-it-anyway
+    steps:
+      - {tool: api_request, arguments: {method: POST, path: /repos/orbit/api/issues/54/comments, body: {body: "@marcus has the fix for this shipped yet?"}}}
+      - {tool: coworker_reply, arguments: {coworker: marcus, text: "Yes: #32 fixed it, and it shipped in v2.3.1."}}
+      - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/54, body: {milestone: 2}}}
+      - {tool: submit, arguments: {}}
+    max_reward: 0

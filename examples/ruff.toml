@@ -1,0 +1,2 @@
+# The examples follow the Python package's style.
+extend = "../python/pyproject.toml"

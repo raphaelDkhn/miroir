@@ -1,0 +1,51 @@
+split: train
+instruction: >-
+  Hook orbit/mobile up to our new CI. Add a webhook that sends push and pull request events,
+  and nothing else, as JSON to http://127.0.0.1:9000/ci/orbit-mobile, signed with the secret
+  mobile-ci-hook. Then send it a test delivery so the CI team sees it arrive.
+max_steps: 15
+# Repository 3 is orbit/mobile. Gitea turns "pull_request" into all of its pull_request_* events.
+checks:
+  - name: hook
+    weight: 0.6
+    sql: |
+      SELECT count(*) = 1 FROM webhook w
+      WHERE w.repo_id = 3 AND w.url = 'http://127.0.0.1:9000/ci/orbit-mobile' AND w.is_active
+        AND w.content_type = 1 AND w.secret = 'mobile-ci-hook'
+        AND (SELECT bool_and((value = 'true') = (key = 'push' OR key LIKE 'pull\_request%'))
+             FROM json_each_text(w.events::json -> 'events'))
+  - name: delivered
+    weight: 0.4
+    db: episode
+    sql: |
+      SELECT count(*) >= 1 FROM effects
+      WHERE kind = 'http' AND json_extract(data, '$.method') = 'POST'
+        AND json_extract(data, '$.path') = '/ci/orbit-mobile'
+        AND json_extract(data, '$.headers.x-gitea-event') = 'push'
+  - name: only_this_hook
+    gate: true
+    db: episode
+    sql: |
+      SELECT count(*) = 0 FROM changes
+      WHERE tbl = 'webhook' AND json_extract(coalesce(after, before), '$.repo_id') <> 3
+allowed_changes:
+  - {table: webhook, op: insert}
+  - {table: webhook, op: update}
+golden:
+  - {tool: api_docs, arguments: {operation: "POST /repos/{owner}/{repo}/hooks"}}
+  - {tool: api_request, arguments: {method: POST, path: /repos/orbit/mobile/hooks, body: {type: gitea, active: true, events: [push, pull_request], config: {url: "http://127.0.0.1:9000/ci/orbit-mobile", content_type: json, secret: mobile-ci-hook}}}}
+  - {tool: api_request, arguments: {method: GET, path: /repos/orbit/mobile/hooks}}
+  - {tool: api_request, arguments: {method: POST, path: /repos/orbit/mobile/hooks/4/tests}}
+  - {tool: submit, arguments: {answer: "orbit/mobile now sends push and pull request events to CI."}}
+probes:
+  - name: sends-issue-events-too
+    steps:
+      - {tool: api_request, arguments: {method: POST, path: /repos/orbit/mobile/hooks, body: {type: gitea, active: true, events: [push, pull_request, issues], config: {url: "http://127.0.0.1:9000/ci/orbit-mobile", content_type: json, secret: mobile-ci-hook}}}}
+      - {tool: api_request, arguments: {method: POST, path: /repos/orbit/mobile/hooks/4/tests}}
+      - {tool: submit, arguments: {}}
+    max_reward: 0.4
+  - name: never-tests-it
+    steps:
+      - {tool: api_request, arguments: {method: POST, path: /repos/orbit/mobile/hooks, body: {type: gitea, active: true, events: [push, pull_request], config: {url: "http://127.0.0.1:9000/ci/orbit-mobile", content_type: json, secret: mobile-ci-hook}}}}
+      - {tool: submit, arguments: {}}
+    max_reward: 0.6

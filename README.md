@@ -113,8 +113,9 @@ golden:
 Tasks can also have probes (runs whose reward must stay in bounds), a typed `answer`, `coworkers`
 played by a model, and clock `events`. Every field is in the
 [manifest](docs/src/reference/manifest.md) and [task](docs/src/reference/task.md) references, and
-[fixtures/](fixtures) has full examples for Postgres, MySQL and several apps. Run `miroir check`
-until it passes: it replays each golden run, an empty submit, repeats and probes, and checks that
+[fixtures/](fixtures) has full examples for Postgres, MySQL and several apps.
+[examples/gitea](examples/gitea) makes the stock Gitea image an env, with twelve tasks for an
+engineering manager's agent and a GRPO training script. Run `miroir check` until it passes: it replays each golden run, an empty submit, repeats and probes, and checks that
 the env idles, resets cleanly and writes only to its state.
 Runs that call `run_code` need a sandbox: [sandbox/check.sh](sandbox/check.sh) runs the check
 beside one.
@@ -216,6 +217,7 @@ cargo test --locked --test integration -- --ignored    # builds the fixture imag
 | `python/` | client, TRL and verifiers adapters, host-side CLI |
 | `sandbox/` | the image that runs `run_code` commands |
 | `fixtures/` | example products and their envs |
+| `examples/` | real products made envs: Gitea |
 | `tests/` | Docker integration tests and OpenEnv conformance |
 | `tools/` | reset timing and pool soak benchmarks |
 | `docs/` | the documentation, an mdBook |

@@ -43,6 +43,15 @@ target "mini-shop-env" {
   output     = ["type=docker"]
 }
 
+target "gitea-env" {
+  context    = "examples/gitea"
+  dockerfile = "Dockerfile.miroir"
+  args       = { MIROIR_IMAGE = "miroir:dev" }
+  contexts   = { "miroir:dev" = "target:miroir" }
+  tags       = ["gitea-env"]
+  output     = ["type=docker"]
+}
+
 target "acme-apps-env" {
   context    = "fixtures/acme-apps"
   dockerfile = "../acme-crm/Dockerfile.miroir"

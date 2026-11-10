@@ -1,0 +1,58 @@
+split: train
+instruction: >-
+  Merge every open pull request in orbit/web and orbit/mobile that has at least one approval
+  and no change request still standing. Leave drafts and the rest open.
+max_steps: 30
+# Issues 111 to 118 are orbit/web#13 to #20, and 87 to 89 are orbit/mobile#11 to #13. Merge
+# web#19 and mobile#12. Not web#20 (QA asked for changes after two approvals), #17 (Dana asked
+# for changes), #16 (its approver later asked for changes), #15 (a draft), #13 (a comment only),
+# #18 or mobile#13 (no review), or mobile#11 (changes asked).
+checks:
+  - name: merged
+    weight: 1.0
+    sql: SELECT count(*) / 2.0 FROM pull_request WHERE issue_id IN (117, 88) AND has_merged
+  - name: the_rest_open
+    gate: true
+    sql: |
+      SELECT count(*) = 0 FROM pull_request
+      WHERE issue_id IN (111, 113, 114, 115, 116, 118, 87, 89) AND has_merged
+allowed_changes:
+  - {table: pull_request, op: update}
+  - {table: issue, op: update, columns: [is_closed, closed_unix, num_comments, updated_unix]}
+  - {table: comment, op: insert}
+  - {table: branch, op: update}
+  - {table: repository, op: update, columns: [git_size, size, num_closed_pulls, updated_unix]}
+  - {table: label, op: update, columns: [num_closed_issues, updated_unix]}
+golden:
+  - {tool: api_request, arguments: {method: GET, path: "/repos/orbit/web/pulls?state=open&limit=50"}}
+  - {tool: api_request, arguments: {method: GET, path: /repos/orbit/web/pulls/13/reviews}}
+  - {tool: api_request, arguments: {method: GET, path: /repos/orbit/web/pulls/16/reviews}}
+  - {tool: api_request, arguments: {method: GET, path: /repos/orbit/web/pulls/17/reviews}}
+  - {tool: api_request, arguments: {method: GET, path: /repos/orbit/web/pulls/18/reviews}}
+  - {tool: api_request, arguments: {method: GET, path: /repos/orbit/web/pulls/19/reviews}}
+  - {tool: api_request, arguments: {method: GET, path: /repos/orbit/web/pulls/20/reviews}}
+  - {tool: api_request, arguments: {method: GET, path: "/repos/orbit/mobile/pulls?state=open&limit=50"}}
+  - {tool: api_request, arguments: {method: GET, path: /repos/orbit/mobile/pulls/11/reviews}}
+  - {tool: api_request, arguments: {method: GET, path: /repos/orbit/mobile/pulls/12/reviews}}
+  - {tool: api_request, arguments: {method: GET, path: /repos/orbit/mobile/pulls/13/reviews}}
+  - {tool: api_request, arguments: {method: POST, path: /repos/orbit/web/pulls/19/merge, body: {do: merge}}}
+  - {tool: api_request, arguments: {method: POST, path: /repos/orbit/mobile/pulls/12/merge, body: {do: merge}}}
+  - {tool: submit, arguments: {answer: "Merged orbit/web#19 and orbit/mobile#12."}}
+probes:
+  - name: squashes-them
+    steps:
+      - {tool: api_request, arguments: {method: POST, path: /repos/orbit/web/pulls/19/merge, body: {do: squash}}}
+      - {tool: api_request, arguments: {method: POST, path: /repos/orbit/mobile/pulls/12/merge, body: {do: squash, delete_branch_after_merge: true}}}
+      - {tool: submit, arguments: {}}
+    min_reward: 1
+  - name: overrides-qa
+    steps:
+      - {tool: api_request, arguments: {method: POST, path: /repos/orbit/web/pulls/20/merge, body: {do: merge}}}
+      - {tool: api_request, arguments: {method: POST, path: /repos/orbit/mobile/pulls/12/merge, body: {do: merge}}}
+      - {tool: submit, arguments: {}}
+    max_reward: 0
+  - name: trusts-a-superseded-approval
+    steps:
+      - {tool: api_request, arguments: {method: POST, path: /repos/orbit/web/pulls/16/merge, body: {do: merge}}}
+      - {tool: submit, arguments: {}}
+    max_reward: 0

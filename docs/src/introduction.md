@@ -37,4 +37,7 @@ Both are called `miroir`. Inside the image it is always the Rust binary.
 - Making an env for your product: start at [Add Miroir to the image](make/image.md).
 - Training on an env: see [Serve an env](run/serve.md) and [TRL](train/trl.md) or
   [verifiers](train/verifiers.md).
+- Seeing it on a real product:
+  [`examples/gitea`](https://github.com/raphaelDkhn/miroir/tree/master/examples/gitea) makes the
+  stock Gitea image an env, with tasks, probes and a training script.
 - Looking up a field: see the [reference](reference/manifest.md).

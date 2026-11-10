@@ -43,7 +43,10 @@ the product's own Dockerfile or compose file, migrations, seed scripts, OpenAPI 
 code. The Miroir repository's
 [`fixtures/`](https://github.com/raphaelDkhn/miroir/tree/master/fixtures) are envs that pass
 `check`: `acme-crm` (Postgres, Redis, a worker, an MCP server), `mini-shop` (MySQL, two worlds)
-and `acme-apps` (several apps).
+and `acme-apps` (several apps). Its
+[`examples/gitea`](https://github.com/raphaelDkhn/miroir/tree/master/examples/gitea) makes a
+stock product image an env: Gitea with Postgres, Unix-time columns, mail and webhooks in the
+sinks, a coworker and a clock.
 
 ## Make an env
 

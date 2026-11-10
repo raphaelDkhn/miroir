@@ -1,0 +1,28 @@
+ARG PRODUCT_IMAGE=gitea/gitea:28.3.0
+ARG MIROIR_IMAGE=ghcr.io/raphaeldkhn/miroir:0.1
+FROM ${MIROIR_IMAGE} AS miroir
+
+# The stock Gitea image. Miroir runs every process of the env in this one container, so
+# Postgres goes in too; python3 runs the seed.
+FROM ${PRODUCT_IMAGE}
+ARG PRODUCT_IMAGE
+RUN apk add --no-cache postgresql17 postgresql17-client python3 tini
+ENV MIROIR_ENV_VERSION=${PRODUCT_IMAGE}
+COPY --from=miroir /miroir /usr/local/bin/miroir
+COPY app.ini /etc/gitea/app.ini
+COPY seed.py /opt/orbit/seed.py
+COPY miroir.yaml /miroir/miroir.yaml
+COPY tasks/ /miroir/tasks/
+# The image declares /data a volume, which keeps nothing a build writes: Gitea's state goes to
+# /var/lib/gitea instead.
+RUN for secret in SECRET_KEY INTERNAL_TOKEN JWT_SECRET LFS_JWT_SECRET; do \
+      file=/etc/gitea/$(echo "$secret" | tr A-Z a-z) \
+      && gitea generate secret "$secret" > "$file" && chown git:git "$file" && chmod 0400 "$file"; \
+    done \
+ && install -d -o postgres -g postgres /var/lib/postgresql/data /run/postgresql \
+ && su postgres -s /bin/sh -c "initdb -D /var/lib/postgresql/data --auth=trust --encoding=UTF8 --locale=C.UTF-8" \
+ && install -d -o git -g git /var/lib/gitea \
+ && miroir bake
+EXPOSE 8000
+ENTRYPOINT ["tini", "--", "miroir"]
+CMD ["run"]

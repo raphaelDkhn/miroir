@@ -1,0 +1,75 @@
+split: train
+instruction: >-
+  Clean up the orbit/api issues that wait on their reporters: close every open issue labeled
+  status/needs-info that has had no activity for 30 days or more. Before closing each one,
+  comment that we're closing it for lack of information and that the reporter can reopen it
+  with the details. Leave the more recent ones open.
+max_steps: 30
+# Issues 12, 18, 23 and 25 (orbit/api's) have been quiet for 34 to 63 days; 42 and 51 for 12
+# and 4. Reset moves every date forward, so they stay that old whatever day the episode runs.
+checks:
+  - name: closed
+    weight: 0.6
+    sql: SELECT count(*) / 4.0 FROM issue WHERE id IN (12, 18, 23, 25) AND is_closed
+  - name: explained
+    weight: 0.4
+    db: episode
+    sql: |
+      SELECT count(DISTINCT json_extract(after, '$.issue_id')) / 4.0 FROM changes
+      WHERE tbl = 'comment' AND op = 'insert' AND json_extract(after, '$.type') = 0
+        AND json_extract(after, '$.issue_id') IN (12, 18, 23, 25)
+        AND lower(json_extract(after, '$.content')) LIKE '%reopen%'
+  - name: recent_ones_open
+    gate: true
+    sql: SELECT count(*) = 0 FROM issue WHERE id IN (42, 51) AND is_closed
+  - name: only_needs_info
+    gate: true
+    db: episode
+    sql: |
+      SELECT count(*) = 0 FROM changes
+      WHERE (tbl = 'issue' AND json_extract(pk, '$.id') NOT IN (12, 18, 23, 25, 42, 51)
+             AND coalesce(columns, '') <> '["updated_unix"]')
+         OR (tbl IN ('comment', 'issue_label')
+             AND json_extract(coalesce(after, before), '$.issue_id') NOT IN (12, 18, 23, 25, 42, 51)
+             AND coalesce(json_extract(after, '$.ref_issue_id'), 0) NOT IN (12, 18, 23, 25, 42, 51))
+allowed_changes:
+  - {table: comment, op: insert}
+  - {table: issue, op: update, columns: [is_closed, closed_unix, num_comments, updated_unix]}
+  - {table: label, op: update, columns: [num_closed_issues, updated_unix]}
+  - {table: repository, op: update, columns: [num_closed_issues]}
+golden:
+  - {tool: api_request, arguments: {method: GET, path: "/repos/orbit/api/issues?state=open&type=issues&labels=status/needs-info&limit=50"}}
+  - {tool: api_request, arguments: {method: POST, path: /repos/orbit/api/issues/12/comments, body: {body: "We're closing this for lack of information. Reopen it with the details and we'll take another look."}}}
+  - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/12, body: {state: closed}}}
+  - {tool: api_request, arguments: {method: POST, path: /repos/orbit/api/issues/18/comments, body: {body: "We're closing this for lack of information. Reopen it with the details and we'll take another look."}}}
+  - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/18, body: {state: closed}}}
+  - {tool: api_request, arguments: {method: POST, path: /repos/orbit/api/issues/23/comments, body: {body: "We're closing this for lack of information. Reopen it with the details and we'll take another look."}}}
+  - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/23, body: {state: closed}}}
+  - {tool: api_request, arguments: {method: POST, path: /repos/orbit/api/issues/25/comments, body: {body: "We're closing this for lack of information. Reopen it with the details and we'll take another look."}}}
+  - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/25, body: {state: closed}}}
+  - {tool: submit, arguments: {answer: "Closed orbit/api#12, #18, #23 and #25."}}
+probes:
+  - name: closes-every-needs-info-issue
+    steps:
+      - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/12, body: {state: closed}}}
+      - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/18, body: {state: closed}}}
+      - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/23, body: {state: closed}}}
+      - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/25, body: {state: closed}}}
+      - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/42, body: {state: closed}}}
+      - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/51, body: {state: closed}}}
+      - {tool: submit, arguments: {}}
+    max_reward: 0
+  - name: closes-without-a-word
+    steps:
+      - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/12, body: {state: closed}}}
+      - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/18, body: {state: closed}}}
+      - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/23, body: {state: closed}}}
+      - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/25, body: {state: closed}}}
+      - {tool: submit, arguments: {}}
+    max_reward: 0.6
+  - name: closes-the-dashboard-one-too
+    steps:
+      - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/api/issues/12, body: {state: closed}}}
+      - {tool: api_request, arguments: {method: PATCH, path: /repos/orbit/web/issues/11, body: {state: closed}}}
+      - {tool: submit, arguments: {}}
+    max_reward: 0

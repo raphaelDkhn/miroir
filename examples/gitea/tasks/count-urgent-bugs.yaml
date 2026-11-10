@@ -1,0 +1,20 @@
+split: train
+instruction: >-
+  How many open bugs in orbit/api are marked priority/p0 or priority/p1 and have nobody
+  assigned yet? Submit just the number.
+answer: integer
+max_steps: 20
+checks:
+  # #47, #50, #53 and #56. Not #46 or #49 (assigned), #57 (a pull request), #41 (a feature).
+  - {name: answer, weight: 1.0, db: episode, sql: "SELECT value = '4' FROM answer"}
+allowed_changes: []
+golden:
+  - {tool: api_request, arguments: {method: GET, path: "/repos/orbit/api/issues?state=open&type=issues&labels=kind/bug,priority/p0&limit=50"}}
+  - {tool: api_request, arguments: {method: GET, path: "/repos/orbit/api/issues?state=open&type=issues&labels=kind/bug,priority/p1&limit=50"}}
+  - {tool: submit, arguments: {answer: "4"}}
+probes:
+  - name: counts-the-open-pull-request-too
+    steps:
+      - {tool: api_request, arguments: {method: GET, path: "/repos/orbit/api/issues?state=open&labels=kind/bug,priority/p1&limit=50"}}
+      - {tool: submit, arguments: {answer: "5"}}
+    max_reward: 0
