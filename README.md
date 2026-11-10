@@ -7,6 +7,8 @@ time. `miroir run` then restores that seed before every episode, serves the agen
 OpenEnv (WebSocket) and MCP, and grades the end state from the rows that changed and the email and
 HTTP calls the product sent.
 
+The documentation is the book in [docs/](docs/src/introduction.md): `mdbook serve docs`.
+
 ## How it works
 
 - **Bake** starts the datastores and runs the manifest's `bake` commands, then starts the apps and
@@ -94,10 +96,11 @@ golden:
 ```
 
 Tasks can also have probes (runs whose reward must stay in bounds), a typed `answer`, `coworkers`
-played by a model, and clock `events`. The field docs are in [src/manifest.rs](src/manifest.rs) and
-[src/task.rs](src/task.rs), and [fixtures/](fixtures) has full examples for Postgres, MySQL and
-several apps. Run `miroir check` until it passes: it replays each golden run, an empty submit,
-repeats and probes, and checks that the env idles, resets cleanly and writes only to its state.
+played by a model, and clock `events`. Every field is in the
+[manifest](docs/src/reference/manifest.md) and [task](docs/src/reference/task.md) references, and
+[fixtures/](fixtures) has full examples for Postgres, MySQL and several apps. Run `miroir check`
+until it passes: it replays each golden run, an empty submit, repeats and probes, and checks that
+the env idles, resets cleanly and writes only to its state.
 Runs that call `run_code` need a sandbox: [sandbox/check.sh](sandbox/check.sh) runs the check
 beside one.
 
@@ -200,5 +203,6 @@ cargo test --locked --test integration -- --ignored    # builds the fixture imag
 | `fixtures/` | example products and their envs |
 | `tests/` | Docker integration tests and OpenEnv conformance |
 | `tools/` | reset timing and pool soak benchmarks |
+| `docs/` | the documentation, an mdBook |
 
 Licensed under [Apache-2.0](LICENSE).

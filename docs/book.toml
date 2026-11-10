@@ -1,0 +1,10 @@
+[book]
+title = "Miroir"
+description = "Turn a product's container into a reinforcement-learning environment for agents."
+language = "en"
+
+[build]
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/raphaelDkhn/miroir"
