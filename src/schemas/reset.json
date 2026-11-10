@@ -1,0 +1,15 @@
+{
+  "title": "ResetRequest",
+  "description": "task_id always wins. Otherwise the split's task at index in ID order, at seed mod n, or a random one, leaving out tasks with coworkers unless coworkers is true. With max_seconds, a call that many seconds after the reset ends the episode as it stands instead of running. With coworkers, the client answers their turns with coworkers and coworker_reply frames; a task_id naming a task with coworkers needs it. Unknown fields are refused.",
+  "type": "object",
+  "properties": {
+    "task_id": {"type": "string"},
+    "split": {"enum": ["train", "validation", "test"], "default": "train"},
+    "index": {"type": "integer", "minimum": 0},
+    "seed": {"type": "integer", "minimum": 0},
+    "episode_id": {"type": "string", "maxLength": 255},
+    "max_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+    "coworkers": {"type": "boolean", "default": false}
+  },
+  "additionalProperties": false
+}

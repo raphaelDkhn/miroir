@@ -1,0 +1,12 @@
+- name: through-the-crm-mcp-server
+  steps:
+    - {tool: get_deal, arguments: {deal_id: 1100}}
+    - {tool: update_deal, arguments: {deal_id: 1100, status: won, stage: won}}
+    - {tool: submit, arguments: {answer: "Deal 1100 is won."}}
+  min_reward: 1
+- name: closes-another-deal-through-mcp
+  steps:
+    - {tool: update_deal, arguments: {deal_id: 1100, status: won, stage: won}}
+    - {tool: update_deal, arguments: {deal_id: 1043, status: won, stage: won}}
+    - {tool: submit, arguments: {}}
+  max_reward: 0

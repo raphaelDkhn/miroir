@@ -1,0 +1,21 @@
+ARG PRODUCT_IMAGE=ghcr.io/acme/crm:1.4.0
+ARG MIROIR_IMAGE=ghcr.io/raphaeldkhn/miroir:0.1
+FROM ${MIROIR_IMAGE} AS miroir
+
+FROM ${PRODUCT_IMAGE}
+ARG PRODUCT_IMAGE
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends postgresql-15 redis-server tini \
+ && rm -rf /var/lib/apt/lists/*
+ENV PATH=/usr/lib/postgresql/15/bin:$PATH MIROIR_ENV_VERSION=${PRODUCT_IMAGE}
+COPY --from=miroir /miroir /usr/local/bin/miroir
+COPY miroir.yaml /miroir/miroir.yaml
+COPY tasks/ /miroir/tasks/
+RUN install -d -o postgres -g postgres /var/lib/postgresql/data \
+ && su postgres -c "initdb -D /var/lib/postgresql/data --auth=trust --encoding=UTF8 --locale=C.UTF-8" \
+ && chown node:node /app/uploads \
+ && miroir bake
+EXPOSE 8000
+ENTRYPOINT ["tini", "--", "miroir"]
+CMD ["run"]

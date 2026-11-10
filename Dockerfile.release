@@ -1,0 +1,4 @@
+FROM scratch
+ARG TARGETARCH
+COPY dist/miroir-${TARGETARCH} /miroir
+ENTRYPOINT ["/miroir"]

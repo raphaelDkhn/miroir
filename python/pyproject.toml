@@ -1,0 +1,51 @@
+[project]
+name = "miroir"
+version = "0.1.0"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dependencies = ["websockets>=15"]
+
+[project.optional-dependencies]
+trl = ["trl>=1.17", "datasets>=4.7"]
+verifiers = ["verifiers>=0.4,<0.5"]
+
+[project.scripts]
+miroir = "miroir.cli:main"
+
+[dependency-groups]
+dev = [
+    "miroir[trl,verifiers]",
+    "pytest==9.2.0",
+    "pyyaml==6.0.3",
+    "ruff==0.17.3",
+    "ty==0.0.95",
+    "torch",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.pytest.ini_options]
+addopts = "-m 'not integration'"
+markers = ["integration"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B", "SIM", "RUF"]
+
+[tool.uv.build-backend]
+module-name = ["miroir", "miroir_verifiers"]

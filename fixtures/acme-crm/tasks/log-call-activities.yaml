@@ -1,0 +1,39 @@
+split: train
+instruction: >
+  You just finished quarterly check-in calls for deals 1200, 1201, 1202 and 1203. Log a call
+  activity on each of them with the summary "Quarterly check-in call".
+max_steps: 30
+checks:
+  - name: logged
+    weight: 1.0
+    db: episode
+    sql: |
+      SELECT count(DISTINCT json_extract(after, '$.deal_id')) / 4.0 FROM changes
+      WHERE tbl = 'activities' AND op = 'insert'
+        AND json_extract(after, '$.kind') = 'call'
+        AND json_extract(after, '$.summary') = 'Quarterly check-in call'
+        AND json_extract(after, '$.deal_id') IN (1200, 1201, 1202, 1203)
+  - name: only_these_deals
+    gate: true
+    db: episode
+    sql: |
+      SELECT count(*) = 0 FROM changes
+      WHERE tbl = 'activities' AND json_extract(after, '$.deal_id') NOT IN (1200, 1201, 1202, 1203)
+allowed_changes:
+  - {table: activities, op: insert}
+golden:
+  - {tool: api_request, arguments: {method: POST, path: /deals/1200/activities, body: {kind: call, summary: Quarterly check-in call}}}
+  - {tool: api_request, arguments: {method: POST, path: /deals/1201/activities, body: {kind: call, summary: Quarterly check-in call}}}
+  - {tool: api_request, arguments: {method: POST, path: /deals/1202/activities, body: {kind: call, summary: Quarterly check-in call}}}
+  - {tool: api_request, arguments: {method: POST, path: /deals/1203/activities, body: {kind: call, summary: Quarterly check-in call}}}
+  - {tool: submit, arguments: {answer: "Logged four calls."}}
+probes:
+  - name: logs-another-deal-too
+    steps:
+      - {tool: api_request, arguments: {method: POST, path: /deals/1200/activities, body: {kind: call, summary: Quarterly check-in call}}}
+      - {tool: api_request, arguments: {method: POST, path: /deals/1201/activities, body: {kind: call, summary: Quarterly check-in call}}}
+      - {tool: api_request, arguments: {method: POST, path: /deals/1202/activities, body: {kind: call, summary: Quarterly check-in call}}}
+      - {tool: api_request, arguments: {method: POST, path: /deals/1203/activities, body: {kind: call, summary: Quarterly check-in call}}}
+      - {tool: api_request, arguments: {method: POST, path: /deals/1204/activities, body: {kind: call, summary: Quarterly check-in call}}}
+      - {tool: submit, arguments: {}}
+    max_reward: 0

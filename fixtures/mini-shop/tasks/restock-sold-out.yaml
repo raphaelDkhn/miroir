@@ -1,0 +1,27 @@
+split: train
+world: north
+instruction: >
+  Products 4 and 9 are sold out and a delivery just arrived. Set the stock of each to 25.
+max_steps: 20
+checks:
+  - name: restocked
+    weight: 1.0
+    sql: SELECT COUNT(*) / 2.0 FROM products WHERE id IN (4, 9) AND stock = 25
+  - name: only_products_4_and_9
+    gate: true
+    db: episode
+    sql: SELECT count(*) = 0 FROM changes WHERE tbl = 'products' AND json_extract(pk, '$.id') NOT IN (4, 9)
+allowed_changes:
+  - {table: products, op: update, columns: [stock, updated_at]}
+golden:
+  - {tool: api_request, arguments: {method: PATCH, path: /products/4, body: {stock: 25}}}
+  - {tool: api_request, arguments: {method: PATCH, path: /products/9, body: {stock: 25}}}
+  - {tool: submit, arguments: {}}
+probes:
+  - name: restocks-another-product-too
+    steps:
+      - {tool: api_request, arguments: {method: PATCH, path: /products/4, body: {stock: 25}}}
+      - {tool: api_request, arguments: {method: PATCH, path: /products/9, body: {stock: 25}}}
+      - {tool: api_request, arguments: {method: PATCH, path: /products/5, body: {stock: 25}}}
+      - {tool: submit, arguments: {}}
+    max_reward: 0

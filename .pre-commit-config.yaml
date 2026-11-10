@@ -1,0 +1,52 @@
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --all-targets --locked -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: actionlint
+        name: actionlint
+        entry: actionlint
+        language: system
+        files: ^\.github/workflows/
+      - id: zizmor
+        name: zizmor
+        entry: uvx zizmor==1.31.1 .github/workflows/
+        language: system
+        files: ^\.github/workflows/
+        pass_filenames: false
+      - id: ruff
+        name: ruff
+        entry: uvx ruff==0.17.3 check
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format
+        entry: uvx ruff==0.17.3 format --check
+        language: system
+        types: [python]
+      - id: ty
+        name: ty
+        entry: uv run --locked --directory python ty check
+        language: system
+        files: ^python/
+        pass_filenames: false
+      - id: shellcheck
+        name: shellcheck
+        entry: shellcheck
+        language: system
+        types: [shell]
+      - id: shfmt
+        name: shfmt
+        entry: shfmt -d
+        language: system
+        types: [shell]

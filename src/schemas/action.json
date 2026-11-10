@@ -1,0 +1,26 @@
+{
+  "title": "Action",
+  "description": "A step: list the tools, or call one of them.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "type": {"const": "list_tools"},
+        "metadata": {"type": "object"}
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {"const": "call_tool"},
+        "tool_name": {"type": "string"},
+        "arguments": {"type": "object"},
+        "metadata": {"type": "object"}
+      },
+      "required": ["type", "tool_name"],
+      "additionalProperties": false
+    }
+  ]
+}

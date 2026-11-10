@@ -1,0 +1,289 @@
+openapi: 3.1.0
+info:
+  title: Acme CRM API
+  version: 1.4.0
+  description: >
+    Every request needs `Authorization: Bearer <token>`. Lists take `limit` (default 50,
+    at most 200) and `offset`, and send a `Link` header with rel="next" when more remain.
+paths:
+  /me:
+    get:
+      operationId: getMe
+      summary: The user making the request
+      responses:
+        "200": {description: The current user, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}
+  /users:
+    get:
+      operationId: listUsers
+      summary: List users
+      parameters:
+        - {name: role, in: query, schema: {type: string, enum: [manager, rep]}}
+        - {name: status, in: query, schema: {$ref: "#/components/schemas/UserStatus"}}
+      responses:
+        "200": {description: Users, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/User"}}}}}
+  /users/{id}:
+    get:
+      operationId: getUser
+      summary: Get a user
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      responses:
+        "200": {description: The user, content: {application/json: {schema: {$ref: "#/components/schemas/User"}}}}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /contacts:
+    get:
+      operationId: listContacts
+      summary: List contacts
+      parameters:
+        - {name: owner_id, in: query, schema: {type: integer}}
+        - {name: q, in: query, description: Matches the contact's name or company, schema: {type: string}}
+        - {$ref: "#/components/parameters/Limit"}
+        - {$ref: "#/components/parameters/Offset"}
+      responses:
+        "200": {description: Contacts, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Contact"}}}}}
+    post:
+      operationId: createContact
+      summary: Create a contact
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/ContactInput"}}}}
+      responses:
+        "201": {description: Created; Location names the contact, content: {application/json: {schema: {$ref: "#/components/schemas/Contact"}}}}
+  /contacts/{id}:
+    get:
+      operationId: getContact
+      summary: Get a contact
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      responses:
+        "200": {description: The contact, content: {application/json: {schema: {$ref: "#/components/schemas/Contact"}}}}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      operationId: updateContact
+      summary: Update a contact
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/ContactInput"}}}}
+      responses:
+        "200": {description: The updated contact, content: {application/json: {schema: {$ref: "#/components/schemas/Contact"}}}}
+  /contacts/{id}/merge:
+    post:
+      operationId: mergeContacts
+      summary: Merge a duplicate contact into this one
+      description: Moves every deal of the duplicate to this contact, then deletes the duplicate.
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [duplicate_id], properties: {duplicate_id: {type: integer}}}
+      responses:
+        "200": {description: The contact that was kept, content: {application/json: {schema: {$ref: "#/components/schemas/Contact"}}}}
+  /deals:
+    get:
+      operationId: listDeals
+      summary: List deals
+      parameters:
+        - {name: owner_id, in: query, schema: {type: integer}}
+        - {name: status, in: query, schema: {type: string, enum: [open, won, lost]}}
+        - {name: stage, in: query, schema: {$ref: "#/components/schemas/Stage"}}
+        - {name: contact_id, in: query, schema: {type: integer}}
+        - {name: inactive_days, in: query, description: Only deals with no activity in this many days, schema: {type: integer}}
+        - {$ref: "#/components/parameters/Limit"}
+        - {$ref: "#/components/parameters/Offset"}
+      responses:
+        "200": {description: Deals, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Deal"}}}}}
+    post:
+      operationId: createDeal
+      summary: Create a deal
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/DealInput"}}}}
+      responses:
+        "201": {description: Created; Location names the deal, content: {application/json: {schema: {$ref: "#/components/schemas/Deal"}}}}
+  /deals/{id}:
+    get:
+      operationId: getDeal
+      summary: Get a deal
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      responses:
+        "200": {description: The deal, content: {application/json: {schema: {$ref: "#/components/schemas/Deal"}}}}
+        "404": {$ref: "#/components/responses/NotFound"}
+    patch:
+      operationId: updateDeal
+      summary: Update a deal
+      description: Changing owner_id emails the new owner unless notify=false.
+      parameters:
+        - {$ref: "#/components/parameters/Id"}
+        - {name: notify, in: query, description: Set to false to skip the email to a new owner, schema: {type: boolean, default: true}}
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/DealInput"}}}}
+      responses:
+        "200": {description: The updated deal, content: {application/json: {schema: {$ref: "#/components/schemas/Deal"}}}}
+  /deals/{id}/notes:
+    get:
+      operationId: listDealNotes
+      summary: List a deal's notes
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      responses:
+        "200": {description: Notes, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Note"}}}}}
+    post:
+      operationId: createDealNote
+      summary: Add a note to a deal; also logs a note activity
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [text], properties: {text: {type: string}}}}}
+      responses:
+        "201": {description: The note, content: {application/json: {schema: {$ref: "#/components/schemas/Note"}}}}
+  /deals/{id}/activities:
+    get:
+      operationId: listDealActivities
+      summary: List a deal's activities, newest first
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      responses:
+        "200": {description: Activities, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Activity"}}}}}
+    post:
+      operationId: createDealActivity
+      summary: Log an activity on a deal
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, summary]
+              properties:
+                kind: {type: string, enum: [call, email, meeting, note]}
+                summary: {type: string}
+      responses:
+        "201": {description: The activity, content: {application/json: {schema: {$ref: "#/components/schemas/Activity"}}}}
+  /invoices:
+    get:
+      operationId: listInvoices
+      summary: List invoices
+      parameters:
+        - {name: status, in: query, schema: {type: string, enum: [open, paid, void]}}
+        - {name: deal_id, in: query, schema: {type: integer}}
+        - {name: contact_id, in: query, description: Invoices of this contact's deals, schema: {type: integer}}
+        - {name: number, in: query, schema: {type: string, example: INV-00042}}
+        - {name: overdue, in: query, description: true for open invoices past their due date, schema: {type: boolean}}
+        - {$ref: "#/components/parameters/Limit"}
+        - {$ref: "#/components/parameters/Offset"}
+      responses:
+        "200": {description: Invoices, content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Invoice"}}}}}
+  /invoices/{id}:
+    get:
+      operationId: getInvoice
+      summary: Get an invoice
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      responses:
+        "200": {description: The invoice, content: {application/json: {schema: {$ref: "#/components/schemas/Invoice"}}}}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /invoices/{id}/pay:
+    post:
+      operationId: payInvoice
+      summary: Charge an open invoice through the payment provider and mark it paid
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      responses:
+        "200": {description: The paid invoice, content: {application/json: {schema: {$ref: "#/components/schemas/Invoice"}}}}
+        "409": {description: The invoice is not open, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+  /invoices/{id}/void:
+    post:
+      operationId: voidInvoice
+      summary: Void an invoice
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      responses:
+        "200": {description: The voided invoice, content: {application/json: {schema: {$ref: "#/components/schemas/Invoice"}}}}
+  /exports:
+    post:
+      operationId: createExport
+      summary: Export deals as a CSV file in the uploads area
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind]
+              properties:
+                kind: {type: string, enum: [deals]}
+                owner_id: {type: integer}
+                status: {type: string, enum: [open, won, lost]}
+      responses:
+        "201":
+          description: The file written
+          content: {application/json: {schema: {type: object, properties: {file: {type: string}, rows: {type: integer}}}}}
+components:
+  parameters:
+    Id: {name: id, in: path, required: true, schema: {type: integer}}
+    Limit: {name: limit, in: query, schema: {type: integer, default: 50, maximum: 200}}
+    Offset: {name: offset, in: query, schema: {type: integer, default: 0}}
+  responses:
+    NotFound: {description: Not found, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+  schemas:
+    Error: {type: object, properties: {error: {type: string}}}
+    UserStatus: {type: string, enum: [active, leaving, inactive]}
+    Stage: {type: string, enum: [lead, qualified, proposal, won, lost]}
+    User:
+      type: object
+      properties:
+        id: {type: integer}
+        name: {type: string}
+        email: {type: string}
+        role: {type: string, enum: [manager, rep]}
+        status: {$ref: "#/components/schemas/UserStatus"}
+    ContactInput:
+      type: object
+      properties:
+        name: {type: string}
+        email: {type: string}
+        company: {type: string}
+        phone: {type: string}
+        owner_id: {type: integer}
+    Contact:
+      allOf:
+        - $ref: "#/components/schemas/ContactInput"
+        - type: object
+          properties:
+            id: {type: integer}
+            birthday: {type: string, format: date}
+            created_at: {type: string, format: date-time}
+            updated_at: {type: string, format: date-time}
+    DealInput:
+      type: object
+      properties:
+        name: {type: string}
+        contact_id: {type: integer}
+        owner_id: {type: integer}
+        stage: {$ref: "#/components/schemas/Stage"}
+        status: {type: string, enum: [open, won, lost]}
+        amount: {type: number}
+        expected_close: {type: string, format: date}
+    Deal:
+      allOf:
+        - $ref: "#/components/schemas/DealInput"
+        - type: object
+          properties:
+            id: {type: integer}
+            owner_name: {type: string}
+            last_activity_at: {type: [string, "null"], format: date-time}
+            created_at: {type: string, format: date-time}
+            updated_at: {type: string, format: date-time}
+    Note:
+      type: object
+      properties: {id: {type: integer}, deal_id: {type: integer}, author_id: {type: integer}, text: {type: string}, created_at: {type: string, format: date-time}}
+    Activity:
+      type: object
+      properties:
+        id: {type: integer}
+        deal_id: {type: integer}
+        user_id: {type: integer}
+        kind: {type: string, enum: [call, email, meeting, note]}
+        summary: {type: string}
+        occurred_at: {type: string, format: date-time}
+    Invoice:
+      type: object
+      properties:
+        id: {type: integer}
+        deal_id: {type: integer}
+        number: {type: string}
+        amount: {type: number}
+        currency: {type: string}
+        status: {type: string, enum: [open, paid, void]}
+        due_date: {type: string, format: date}
+        paid_at: {type: [string, "null"], format: date-time}
+        payment_intent: {type: [string, "null"]}

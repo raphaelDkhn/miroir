@@ -1,0 +1,12 @@
+{
+  "name": "acme-crm",
+  "version": "1.4.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "bullmq": "6.4.2",
+    "ioredis": "6.0.0",
+    "nodemailer": "10.2.1",
+    "pg": "8.23.1"
+  }
+}

@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml  # zizmor: ignore[self-repository]
+
+  release:
+    needs: ci
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    env:
+      IMAGE: ghcr.io/raphaeldkhn/miroir
+      SANDBOX_IMAGE: ghcr.io/raphaeldkhn/miroir-sandbox
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+      - name: Build the static binaries
+        run: |
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            uvx --from cargo-zigbuild==0.24.0 cargo-zigbuild zigbuild \
+              --release --locked --target "$target"
+          done
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-musl/release/miroir dist/miroir-amd64
+          cp target/aarch64-unknown-linux-musl/release/miroir dist/miroir-arm64
+          (cd dist && sha256sum miroir-* > SHA256SUMS)
+      - name: Image tags
+        id: tags
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            tags="$IMAGE:$version,$IMAGE:${version%.*}"
+            sandbox_tags="$SANDBOX_IMAGE:$version,$SANDBOX_IMAGE:${version%.*}"
+            prerelease=false
+          else
+            tags="$IMAGE:$version"
+            sandbox_tags="$SANDBOX_IMAGE:$version"
+            prerelease=true
+          fi
+          {
+            echo "tags=$tags"
+            echo "sandbox_tags=$sandbox_tags"
+            echo "prerelease=$prerelease"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.release
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: sandbox
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: MIROIR_IMAGE=${{ env.IMAGE }}:${{ steps.tags.outputs.version }}
+          tags: ${{ steps.tags.outputs.sandbox_tags }}
+      - name: GitHub release with the binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ steps.tags.outputs.prerelease }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --prerelease="$PRERELEASE"

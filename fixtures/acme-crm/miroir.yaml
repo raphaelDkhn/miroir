@@ -1,0 +1,60 @@
+miroir: 1
+name: acme-crm
+description: Acme CRM, a sales CRM for small teams
+processes:
+  - {name: db, command: [postgres, -D, /var/lib/postgresql/data], user: postgres, datastore: true, ready: {tcp: 5432}}
+  - {name: cache, command: [redis-server, --dir, /var/lib/redis, --bind, 127.0.0.1], user: redis, datastore: true, ready: {tcp: 6379}}
+  - name: web
+    command: [node, dist/server.js]
+    user: node
+    cwd: /app
+    env: {DATABASE_URL: "postgres://crm_app@127.0.0.1:5432/crm"}
+    ready: {http: "http://127.0.0.1:3000/healthz"}
+  - {name: worker, command: [node, dist/worker.js], user: node, cwd: /app,
+     env: {DATABASE_URL: "postgres://crm_app@127.0.0.1:5432/crm"}}
+  - {name: crm-mcp, command: [node, dist/mcp.js], user: node, cwd: /app,
+     ready: {http: "http://127.0.0.1:3100/healthz"}}
+env:
+  DATABASE_URL: postgres://postgres@127.0.0.1:5432/crm
+  REDIS_URL: redis://127.0.0.1:6379
+  SMTP_URL: smtp://127.0.0.1:2525
+  STRIPE_API_BASE: http://127.0.0.1:9000/stripe
+  SCHEDULER_ENABLED: "false"
+bake:
+  - [createdb, -h, 127.0.0.1, -U, postgres, crm]
+  - [node, dist/migrate.js]
+  - [node, dist/seed.js]
+  - [psql, -h, 127.0.0.1, -U, postgres, -d, crm, -v, ON_ERROR_STOP=1, -c,
+     "CREATE ROLE crm_app LOGIN; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO crm_app;
+      GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO crm_app"]
+seed:
+  - [node, -e, "fetch('http://127.0.0.1:3000/deals/1100/notes', {method: 'POST',
+     headers: {authorization: 'Bearer seed-token-dana', 'content-type': 'application/json'},
+     body: JSON.stringify({text: 'Seeded through the API'})}).then((r) => process.exit(r.ok ? 0 : 1))"]
+state: [/var/lib/postgresql/data, /var/lib/redis, /app/uploads]
+apps:
+  crm:
+    api:
+      base_url: http://127.0.0.1:3000
+      openapi: /app/openapi.yaml
+    mcp: {url: http://127.0.0.1:3100/mcp}
+    database:
+      url: postgres://postgres@127.0.0.1:5432/crm
+      ignore: [api_tokens.last_used_at]
+      time:
+        exclude: [contacts.birthday]
+        epoch: {deals.synced_unix: s}
+time:
+  anchor: bake
+personas:
+  sales_manager:
+    description: Dana Lee, sales manager at Acme (dana@acme.test)
+    headers: {crm: {Authorization: Bearer seed-token-dana}}
+sinks:
+  smtp: 2525
+  http: 9000
+  responses:
+    "POST /stripe/v1/payment_intents": {status: 200, json: {id: pi_test, object: payment_intent, status: succeeded}}
+quiet:
+  command: [sh, -c, 'test "$(redis-cli llen bull:email:wait)$(redis-cli llen bull:email:active)" = 00']
+  timeout_s: 30

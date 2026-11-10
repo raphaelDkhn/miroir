@@ -1,0 +1,38 @@
+split: test
+instruction: Ask Priya Shah (priya) in a note on deal 1100 which stage it is really at, then set it.
+max_steps: 10
+coworkers:
+  - name: priya
+    description: Priya Shah, account executive at Acme (priya@acme.test)
+    script: Deal 1100 fell back to qualified last week, since the buyer asked to re-scope it.
+    headers: {crm: {Authorization: Bearer seed-token-priya}}
+    inbox:
+      sql: >-
+        SELECT json_agg(json_build_object('id', id, 'text', text, 'deal', deal_id) ORDER BY id)
+        FROM notes WHERE author_id = 1 AND text ~* '@priya\M'
+    reply: {method: POST, path: "/deals/{deal}/notes", body: {text: "{text}"}}
+checks:
+  - name: set_after_asking
+    weight: 1.0
+    db: episode
+    sql: >-
+      SELECT EXISTS (SELECT 1 FROM changes WHERE tbl = 'deals' AND op = 'update'
+                     AND json_extract(pk, '$.id') = 1100
+                     AND json_extract(after, '$.stage') = 'qualified')
+         AND EXISTS (SELECT 1 FROM changes WHERE tbl = 'notes' AND op = 'insert'
+                     AND json_extract(after, '$.author_id') = 12)
+allowed_changes:
+  - {table: deals, op: update, columns: [stage, updated_at]}
+  - {table: notes, op: insert}
+  - {table: activities, op: insert}
+golden:
+  - {tool: api_request, arguments: {method: POST, path: /deals/1100/notes, body: {text: "@priya which stage is deal 1100 at?"}}}
+  - {tool: coworker_reply, arguments: {coworker: priya, text: "Qualified: they asked to re-scope."}}
+  - {tool: api_request, arguments: {method: PATCH, path: /deals/1100, body: {stage: qualified}}}
+  - {tool: submit}
+probes:
+  - name: guesses-without-asking
+    steps:
+      - {tool: api_request, arguments: {method: PATCH, path: /deals/1100, body: {stage: qualified}}}
+      - {tool: submit}
+    max_reward: 0

@@ -1,0 +1,92 @@
+miroir: 1
+name: acme-apps
+description: Two Acme CRMs on one Postgres, one office each, to test envs with several apps
+processes:
+  - {name: db, command: [postgres, -D, /var/lib/postgresql/data], user: postgres, datastore: true, ready: {tcp: 5432}}
+  - {name: cache, command: [redis-server, --dir, /var/lib/redis, --bind, 127.0.0.1], user: redis, datastore: true, ready: {tcp: 6379}}
+  - name: east
+    command: [node, dist/server.js]
+    user: node
+    cwd: /app
+    env: {DATABASE_URL: "postgres://crm_app@127.0.0.1:5432/east", PORT: "3000"}
+    ready: {http: "http://127.0.0.1:3000/healthz"}
+  - name: west
+    command: [node, dist/server.js]
+    user: node
+    cwd: /app
+    env: {DATABASE_URL: "postgres://crm_app@127.0.0.1:5432/west", PORT: "3001"}
+    ready: {http: "http://127.0.0.1:3001/healthz"}
+  - name: west-ops
+    command: [node, dist/server.js]
+    user: node
+    cwd: /app
+    env: {DATABASE_URL: "postgres://crm_app@127.0.0.1:5432/west", PORT: "3002"}
+    ready: {http: "http://127.0.0.1:3002/healthz"}
+  - {name: worker, command: [node, dist/worker.js], user: node, cwd: /app,
+     env: {DATABASE_URL: "postgres://crm_app@127.0.0.1:5432/east"}}
+env:
+  REDIS_URL: redis://127.0.0.1:6379
+  SMTP_URL: smtp://127.0.0.1:2525
+  STRIPE_API_BASE: http://127.0.0.1:9000/stripe
+  SCHEDULER_ENABLED: "false"
+bake:
+  - [createdb, -h, 127.0.0.1, -U, postgres, east]
+  - [createdb, -h, 127.0.0.1, -U, postgres, west]
+  - [createdb, -h, 127.0.0.1, -U, postgres, ledger]
+  - [env, "DATABASE_URL=postgres://postgres@127.0.0.1:5432/east", node, dist/migrate.js]
+  - [env, "DATABASE_URL=postgres://postgres@127.0.0.1:5432/east", node, dist/seed.js]
+  - [env, "DATABASE_URL=postgres://postgres@127.0.0.1:5432/west", node, dist/migrate.js]
+  - [env, "DATABASE_URL=postgres://postgres@127.0.0.1:5432/west", node, dist/seed.js]
+  - [psql, -h, 127.0.0.1, -U, postgres, -d, ledger, -v, ON_ERROR_STOP=1, -c,
+     "CREATE TABLE entries (id serial PRIMARY KEY, memo text NOT NULL, booked date NOT NULL);
+      INSERT INTO entries (memo, booked) VALUES ('opening balance', current_date - 30)"]
+  - [psql, -h, 127.0.0.1, -U, postgres, -v, ON_ERROR_STOP=1, -c, CREATE ROLE crm_app LOGIN]
+  - [psql, -h, 127.0.0.1, -U, postgres, -d, east, -v, ON_ERROR_STOP=1, -c,
+     "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO crm_app;
+      GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO crm_app"]
+  - [psql, -h, 127.0.0.1, -U, postgres, -d, west, -v, ON_ERROR_STOP=1, -c,
+     "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO crm_app;
+      GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO crm_app"]
+state: [/var/lib/postgresql/data, /var/lib/redis, /app/uploads]
+apps:
+  east:
+    description: the East office's CRM
+    api:
+      base_url: http://127.0.0.1:3000
+      openapi: /app/openapi.yaml
+    database:
+      url: postgres://postgres@127.0.0.1:5432/east
+      ignore: [api_tokens.last_used_at]
+      time:
+        exclude: [contacts.birthday]
+        epoch: {deals.synced_unix: s}
+  west:
+    description: the West office's CRM
+    api: {base_url: http://127.0.0.1:3001}
+    database:
+      url: postgres://postgres@127.0.0.1:5432/west
+      ignore: [api_tokens.last_used_at]
+      time:
+        epoch: {deals.synced_unix: s}
+  west-ops:
+    description: the West office's CRM, as its operations desk
+    api: {base_url: http://127.0.0.1:3002}
+  ledger:
+    database: {url: postgres://postgres@127.0.0.1:5432/ledger}
+time:
+  anchor: bake
+personas:
+  sales_manager:
+    description: Dana Lee in the East office, Alex Kim in the West and Sam Ortiz at its desk
+    headers:
+      east: {Authorization: Bearer seed-token-dana}
+      west: {Authorization: Bearer seed-token-alex}
+      west-ops: {Authorization: Bearer seed-token-sam}
+sinks:
+  smtp: 2525
+  http: 9000
+  responses:
+    "POST /stripe/v1/payment_intents": {status: 200, json: {id: pi_test, object: payment_intent, status: succeeded}}
+quiet:
+  command: [sh, -c, 'test "$(redis-cli llen bull:email:wait)$(redis-cli llen bull:email:active)" = 00']
+  timeout_s: 30

@@ -1,0 +1,24 @@
+ARG PRODUCT_IMAGE=ghcr.io/acme/mini-shop:1.0.0
+ARG MIROIR_IMAGE=ghcr.io/raphaeldkhn/miroir:0.1
+FROM ${MIROIR_IMAGE} AS miroir
+
+FROM debian:bookworm-slim AS tini
+RUN apt-get update && apt-get install -y --no-install-recommends tini
+
+FROM ${PRODUCT_IMAGE} AS env
+ARG PRODUCT_IMAGE
+USER root
+ENV MIROIR_ENV_VERSION=${PRODUCT_IMAGE}
+COPY --from=tini /usr/bin/tini-static /usr/bin/tini
+COPY --from=miroir /miroir /usr/local/bin/miroir
+COPY miroir.yaml /miroir/miroir.yaml
+COPY tasks/ /miroir/tasks/
+RUN install -d -o mysql -g mysql /var/lib/shopdb \
+ && echo "CREATE USER 'root'@'127.0.0.1'; GRANT ALL ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION; \
+CREATE USER 'shop_app'@'127.0.0.1'; GRANT SELECT, INSERT, UPDATE, DELETE ON shop.* TO 'shop_app'@'127.0.0.1';" > /tmp/init.sql \
+ && mysqld --initialize-insecure --user=mysql --datadir=/var/lib/shopdb --innodb-redo-log-capacity=32M --init-file=/tmp/init.sql \
+ && rm /tmp/init.sql \
+ && miroir bake
+EXPOSE 8000
+ENTRYPOINT ["tini", "--", "miroir"]
+CMD ["run"]

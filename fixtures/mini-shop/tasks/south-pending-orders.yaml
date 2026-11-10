@@ -1,0 +1,18 @@
+split: test
+world: south
+instruction: How many orders are pending? Submit just the number.
+answer: integer
+max_steps: 10
+checks:
+  - name: answer
+    weight: 1.0
+    db: episode
+    sql: SELECT value = '10' FROM answer
+allowed_changes: []
+golden:
+  - {tool: api_request, arguments: {method: GET, path: "/orders?status=pending"}}
+  - {tool: submit, arguments: {answer: "10"}}
+probes:
+  - name: north-count
+    steps: [{tool: submit, arguments: {answer: "11"}}]
+    max_reward: 0

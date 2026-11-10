@@ -1,0 +1,55 @@
+[
+  {
+    "name": "api_request",
+    "description": "Send an HTTP request to the product's API as the current user. Returns the status code, the content-type, location and link headers, and the body.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
+        "path": {"type": "string", "description": "Path and query string relative to the API base URL, such as /deals?owner_id=12"},
+        "body": {"description": "Request body, sent as JSON unless headers set a content-type: then a string is sent as-is, and for application/x-www-form-urlencoded an object is form-encoded"},
+        "headers": {"type": "object", "additionalProperties": {"type": "string"}}
+      },
+      "required": ["method", "path"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "api_docs",
+    "description": "Look up the product's API. With no arguments, lists every operation. With an operation ID or 'METHOD /path', returns that operation's parameters and schemas.",
+    "input_schema": {
+      "type": "object",
+      "properties": {"operation": {"type": "string"}},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "run_code",
+    "description": "Run a bash command in a sandbox that has python3 (with requests), curl and jq, and return its exit code and output (stdout and stderr). Each app's API is at $API_<APP>, the app's name in capitals with '-' as '_' (env lists them); requests there act as the current user and take the paths api_docs lists. Files you write last until the episode ends; processes stop when the call returns. A call is cut off after 60 s, and its output after 64 KiB.",
+    "input_schema": {
+      "type": "object",
+      "properties": {"command": {"type": "string", "description": "The bash command to run."}},
+      "required": ["command"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "wait",
+    "description": "Let time pass in the apps, up to the given minutes: everything already in them moves that much into the past, as if that time had gone by, while their clock keeps reading the real time. The wait ends early when something happens, such as a new message or issue. Returns how many minutes it lasted, and how many have passed since the task began.",
+    "input_schema": {
+      "type": "object",
+      "properties": {"minutes": {"type": "integer", "description": "How many minutes to wait: a whole number from 1 to 10080 (a week)."}},
+      "required": ["minutes"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "submit",
+    "description": "Finish the task. Put any answer the task asks for in answer. This ends the episode.",
+    "input_schema": {
+      "type": "object",
+      "properties": {"answer": {"type": "string"}},
+      "additionalProperties": false
+    }
+  }
+]

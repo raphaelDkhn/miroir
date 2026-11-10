@@ -1,0 +1,19 @@
+split: validation
+instruction: >
+  Marcus Webb wants a spreadsheet of his open deals. Use the CRM's export feature to produce
+  it.
+max_steps: 20
+checks:
+  - name: exported
+    weight: 1.0
+    command:
+      - sh
+      - -c
+      - |
+        file=/app/uploads/exports/deals-owner-7-open.csv
+        want=$(psql "$MIROIR_DATABASE_URL" -tAc "SELECT count(*) + 1 FROM deals WHERE owner_id = 7 AND status = 'open'")
+        test -f "$file" && test "$(wc -l < "$file")" -eq "$want"
+allowed_changes: []
+golden:
+  - {tool: api_request, arguments: {method: POST, path: /exports, body: {kind: deals, owner_id: 7, status: open}}}
+  - {tool: submit, arguments: {answer: "Exported Marcus's open deals."}}

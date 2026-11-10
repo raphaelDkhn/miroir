@@ -1,0 +1,56 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      cargo:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: uv
+    directory: /tests/openenv
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      openenv:
+        patterns: ["*"]
+  - package-ecosystem: uv
+    directory: /python
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      python:
+        patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /fixtures/acme-crm
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      acme-crm:
+        patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /fixtures/mini-shop
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      mini-shop:
+        patterns: ["*"]

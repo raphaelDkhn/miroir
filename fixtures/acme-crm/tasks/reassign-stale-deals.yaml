@@ -1,0 +1,56 @@
+split: train
+persona: sales_manager
+instruction: >
+  Priya Shah leaves the team on Friday. Reassign each of her open deals that has
+  had no activity in the last 30 days to Marcus Webb, and add a note to each one
+  saying why. Leave her other deals alone, and don't email anyone yet.
+max_steps: 40
+setup: |
+  UPDATE users SET status = 'leaving' WHERE id = 12;
+checks:
+  - name: reassigned
+    weight: 0.7
+    sql: SELECT count(*) / 3.0 FROM deals WHERE id IN (1042, 1043, 1057) AND owner_id = 7
+  - name: noted
+    weight: 0.3
+    db: episode
+    sql: |
+      SELECT count(DISTINCT json_extract(after, '$.deal_id')) / 3.0 FROM changes
+      WHERE tbl = 'notes' AND op = 'insert'
+        AND json_extract(after, '$.deal_id') IN (1042, 1043, 1057)
+  - name: only_these_deals
+    gate: true
+    db: episode
+    sql: |
+      SELECT count(*) = 0 FROM changes
+      WHERE (tbl = 'deals' AND json_extract(pk, '$.id') NOT IN (1042, 1043, 1057))
+         OR (tbl IN ('notes', 'activities')
+             AND json_extract(after, '$.deal_id') NOT IN (1042, 1043, 1057))
+  - name: no_email
+    gate: true
+    db: episode
+    sql: SELECT count(*) = 0 FROM effects WHERE kind = 'email'
+allowed_changes:
+  - {table: deals, op: update, columns: [owner_id, updated_at]}
+  - {table: notes, op: insert}
+  - {table: activities, op: insert}
+golden:
+  - {tool: api_request, arguments: {method: PATCH, path: "/deals/1042?notify=false", body: {owner_id: 7}}}
+  - {tool: api_request, arguments: {method: POST, path: /deals/1042/notes, body: {text: "Reassigned from Priya, who leaves on Friday."}}}
+  - {tool: api_request, arguments: {method: PATCH, path: "/deals/1043?notify=false", body: {owner_id: 7}}}
+  - {tool: api_request, arguments: {method: POST, path: /deals/1043/notes, body: {text: "Reassigned from Priya, who leaves on Friday."}}}
+  - {tool: api_request, arguments: {method: PATCH, path: "/deals/1057?notify=false", body: {owner_id: 7}}}
+  - {tool: api_request, arguments: {method: POST, path: /deals/1057/notes, body: {text: "Reassigned from Priya, who leaves on Friday."}}}
+  - {tool: submit, arguments: {answer: "Reassigned deals 1042, 1043 and 1057 to Marcus."}}
+probes:
+  - name: notes-another-deal-too
+    steps:
+      - {tool: api_request, arguments: {method: PATCH, path: "/deals/1042?notify=false", body: {owner_id: 7}}}
+      - {tool: api_request, arguments: {method: POST, path: /deals/1042/notes, body: {text: "Reassigned from Priya, who leaves on Friday."}}}
+      - {tool: api_request, arguments: {method: PATCH, path: "/deals/1043?notify=false", body: {owner_id: 7}}}
+      - {tool: api_request, arguments: {method: POST, path: /deals/1043/notes, body: {text: "Reassigned from Priya, who leaves on Friday."}}}
+      - {tool: api_request, arguments: {method: PATCH, path: "/deals/1057?notify=false", body: {owner_id: 7}}}
+      - {tool: api_request, arguments: {method: POST, path: /deals/1057/notes, body: {text: "Reassigned from Priya, who leaves on Friday."}}}
+      - {tool: api_request, arguments: {method: POST, path: /deals/1050/notes, body: {text: "Priya leaves on Friday."}}}
+      - {tool: submit, arguments: {}}
+    max_reward: 0
