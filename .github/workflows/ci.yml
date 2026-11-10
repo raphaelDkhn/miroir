@@ -56,10 +56,7 @@ jobs:
       - run: >-
           uv export --locked --all-extras --no-dev --no-emit-project --format requirements-txt
           -o "$RUNNER_TEMP/requirements.txt"
-      - run: >-
-          uvx pip-audit==2.10.1 --disable-pip --no-deps -r "$RUNNER_TEMP/requirements.txt"
-          --ignore-vuln CVE-2026-59951 --ignore-vuln CVE-2026-116684
-          --ignore-vuln CVE-2026-116685 --ignore-vuln CVE-2026-116686
+      - run: uvx pip-audit==2.10.1 --disable-pip --no-deps -r "$RUNNER_TEMP/requirements.txt"
 
   supply-chain:
     runs-on: ubuntu-24.04

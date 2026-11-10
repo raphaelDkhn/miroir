@@ -185,8 +185,7 @@ fn shift_sql(table: &Table, columns: &[&Column], by: Move) -> String {
             format!("{q} = CASE WHEN {guard} THEN {moved} ELSE {q} END")
         })
         .collect();
-    let only = if table.partitioned { "" } else { "ONLY " };
-    format!("UPDATE {only}{} SET {}", table.qualified, sets.join(", "))
+    format!("UPDATE {}{} SET {}", only(table), table.qualified, sets.join(", "))
 }
 
 fn moved(value: &str, kind: ColumnKind, by: Move) -> (String, String) {
@@ -201,16 +200,16 @@ fn moved(value: &str, kind: ColumnKind, by: Move) -> (String, String) {
 }
 
 fn shift_in_order_sql(table: &Table, columns: &[&Column], by: Move) -> String {
-    let only = if table.partitioned { "" } else { "ONLY " };
     let order: Vec<String> = columns
         .iter()
         .map(|c| format!("{} {}", quote(Dialect::Postgres, &c.name), by.order()))
         .collect();
     format!(
         "DO $miroir$ DECLARE r record; BEGIN \
-         FOR r IN SELECT tableoid AS tbl, ctid AS id FROM {only}{} ORDER BY {} LOOP \
+         FOR r IN SELECT tableoid AS tbl, ctid AS id FROM {}{} ORDER BY {} LOOP \
          {} WHERE tableoid = r.tbl AND ctid = r.id; \
          END LOOP; END $miroir$",
+        only(table),
         table.qualified,
         order.join(", "),
         shift_sql(table, columns, by)
@@ -396,7 +395,7 @@ pub async fn fingerprint(
     let mut conn = connect(url).await?;
     let mut prints = BTreeMap::new();
     for (table, columns) in tables {
-        let only = if table.partitioned { "" } else { "ONLY " };
+        let only = only(table);
         let sql = if columns.is_empty() {
             format!("SELECT count(*)::text FROM {only}{}", table.qualified)
         } else {

@@ -35,7 +35,7 @@ from miroir_verifiers import (
 TASK = "count-overdue-invoices"
 
 
-def test_vf_eval_finds_the_miroir_taskset_and_env():
+def test_vf_run_finds_the_miroir_taskset_and_env():
     assert taskset_class("miroir-verifiers") is MiroirTaskset
     assert environment_class("miroir-verifiers") is MiroirEnv
     assert env_config_type("miroir-verifiers") is MiroirEnvConfig
@@ -100,7 +100,7 @@ def model() -> Iterator[ScriptedModel]:
     scripted.server.shutdown()
 
 
-def vf_eval(
+def vf_run(
     urls: list[str],
     model: ScriptedModel,
     out: Path,
@@ -137,8 +137,8 @@ def vf_eval(
     if coworker is not None:
         options["--env.taskset.coworker_model"] = "fake"
         options["--env.taskset.coworker_base_url"] = coworker
-    vf = Path(sys.executable).with_name("vf-eval")
-    command = [str(vf), "miroir-verifiers", "--no-push", *(w for o in options.items() for w in o)]
+    vf = Path(sys.executable).with_name("vf-run")
+    command = [str(vf), "miroir-verifiers", *(w for o in options.items() for w in o)]
     env = {**os.environ, "MIROIR_TEST_KEY": "unused", "MIROIR_TEST_TOKEN": token or ""}
     done = subprocess.run(
         command, capture_output=True, text=True, env=env, check=False, timeout=600
@@ -154,7 +154,7 @@ def test_an_eval_of_the_golden_calls_earns_full_reward(urls, model, tmp_path):
     calls = [{"tool": tool, "arguments": arguments} for tool, arguments in golden(TASK)]
     late = {"tool": "api_request", "arguments": {"method": "GET", "path": "/me"}}
     model.replies = [*calls, late]
-    [trace] = vf_eval(urls, model, tmp_path, traces=tmp_path / "miroir")["traces"]
+    [trace] = vf_run(urls, model, tmp_path, traces=tmp_path / "miroir")["traces"]
     offered = sorted(tool["function"]["name"] for tool in model.requests[0]["tools"])
     assert offered == ["api_docs", "api_request", "submit"], "Miroir's own tools, by their names"
     assert model.replies == [], "the model made every call"
@@ -178,7 +178,7 @@ def test_harm_earns_the_training_harm_reward_and_the_record_keeps_the_envs(urls,
         {"tool": "api_request", "arguments": reassign},
         {"tool": "submit", "arguments": {"answer": "3"}},
     ]
-    episode = vf_eval(urls, model, tmp_path, traces=tmp_path / "miroir", harm_reward=-0.5)
+    episode = vf_run(urls, model, tmp_path, traces=tmp_path / "miroir", harm_reward=-0.5)
     [trace] = episode["traces"]
     assert trace["ok"], trace["errors"]
     assert trace["rewards"]["miroir"]["score"] == -0.5, "a change out of scope is harm"
@@ -195,7 +195,7 @@ def test_the_mcp_surface_gives_the_model_the_apps_own_tools(urls, model, tmp_pat
     )
     [through_mcp] = [p for p in probes if p["name"] == "through-the-crm-mcp-server"]
     model.replies = [{"tool": s["tool"], "arguments": s["arguments"]} for s in through_mcp["steps"]]
-    episode = vf_eval(
+    episode = vf_run(
         urls, model, tmp_path, task="close-won-deal", split="validation", surface="mcp"
     )
     [trace] = episode["traces"]
@@ -215,7 +215,7 @@ def test_the_code_surface_runs_the_models_code_in_the_sandbox(code_url, model, t
         {"tool": "submit", "arguments": {"answer": "Deal 1100 is won."}},
     ]
     traces = tmp_path / "miroir"
-    episode = vf_eval(
+    episode = vf_run(
         [code_url],
         model,
         tmp_path,
@@ -267,7 +267,7 @@ def test_a_harm_reward_out_of_range_is_refused(wrong):
 @pytest.mark.integration
 def test_the_mcp_url_carries_the_token_the_harness_cannot_send(token_url, model, tmp_path):
     model.replies = [{"tool": tool, "arguments": arguments} for tool, arguments in golden(TASK)]
-    [trace] = vf_eval([token_url], model, tmp_path, token="s3cret")["traces"]
+    [trace] = vf_run([token_url], model, tmp_path, token="s3cret")["traces"]
     assert trace["ok"], trace["errors"]
     assert trace["rewards"]["miroir"]["score"] == 1.0, "every call got past the token"
 
@@ -298,7 +298,7 @@ def test_a_token_var_that_is_not_set_is_refused(monkeypatch):
 @pytest.mark.integration
 def test_an_eval_that_never_submits_is_graded(urls, model, tmp_path):
     model.replies = [{"tool": "api_request", "arguments": {"method": "GET", "path": "/me"}}]
-    [trace] = vf_eval(urls, model, tmp_path)["traces"]
+    [trace] = vf_run(urls, model, tmp_path)["traces"]
     assert trace["ok"], trace["errors"]
     assert trace["rewards"]["miroir"]["score"] == 0.0
     assert trace["metrics"]["success"] == 0.0
@@ -359,7 +359,7 @@ def test_a_lease_that_completes_after_its_rollout_was_cancelled_is_closed(monkey
 def test_a_rollout_past_its_max_seconds_is_stopped_and_graded(urls, model, tmp_path):
     model.replies = [{"tool": tool, "arguments": arguments} for tool, arguments in golden(TASK)]
     model.delay_s = 3.0
-    episode = vf_eval(urls, model, tmp_path, traces=tmp_path / "miroir", max_seconds=1)
+    episode = vf_run(urls, model, tmp_path, traces=tmp_path / "miroir", max_seconds=1)
     [trace] = episode["traces"]
     assert trace["ok"], trace["errors"]
     assert trace["rewards"]["miroir"]["score"] == 0.0, "graded as it stood when time ran out"
@@ -522,7 +522,7 @@ def test_a_coworker_answers_in_an_eval_through_the_hook(coworker_url, model, tmp
     ]
     priya = FakeModel("Qualified: they asked to re-scope.")
     try:
-        episode = vf_eval(
+        episode = vf_run(
             [coworker_url],
             model,
             tmp_path,

@@ -1,4 +1,4 @@
-"""verifiers adapter: the `miroir-verifiers` taskset and env, which `vf-eval` and training load."""
+"""verifiers adapter: the `miroir-verifiers` taskset and env, which `vf-run` and training load."""
 
 from __future__ import annotations
 

@@ -492,11 +492,7 @@ fn cap(value: Value) -> Value {
     if text.len() <= BODY_LIMIT {
         return value;
     }
-    let mut end = BODY_LIMIT;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    json!({"text": &text[..end], "truncated": true})
+    json!({"text": cut(&text, BODY_LIMIT), "truncated": true})
 }
 
 fn encode_body(body: &Value, headers: &HeaderMap) -> Result<Vec<u8>, ToolError> {

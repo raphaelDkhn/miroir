@@ -29,6 +29,9 @@ use crate::supervisor::{self, exit_code, lookup_user};
 use crate::tools::{BODY_LIMIT, cut};
 
 const WORK: &str = "/work";
+// shortcut: what user `code` can write in sandbox/Dockerfile's image besides `/work` and the
+// temp directories; scan for such directories at startup once other base images are supported.
+const WRITABLE: [&str; 2] = ["/run/lock", "/dev/mqueue"];
 const USER: &str = "code";
 const PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 const MAX_TIMEOUT_S: u64 = 600;
@@ -213,7 +216,7 @@ async fn run_command(
 }
 
 fn fresh_work(user: (u32, u32)) -> std::io::Result<()> {
-    for dir in state::TEMP_DIRS.iter().chain([&WORK]) {
+    for dir in state::TEMP_DIRS.iter().chain(&WRITABLE).chain([&WORK]) {
         state::empty(Path::new(dir))?;
     }
     std::fs::create_dir_all(WORK)?;

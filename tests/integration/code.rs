@@ -102,14 +102,16 @@ async fn nothing_outlives_a_call_and_files_last_only_for_the_episode() {
     let again = json!({"task_id": "close-won-deal", "episode_id": "same-id"});
     session.reset(again.clone()).await;
     let started = Instant::now();
-    assert_eq!(run(&mut session, "sleep 300 & echo kept > f; echo started").await, "started\n");
+    let write = "sleep 300 & echo kept > f; cp f /run/lock; touch /dev/mqueue/f; echo started";
+    assert_eq!(run(&mut session, write).await, "started\n");
     assert!(started.elapsed() < Duration::from_secs(10), "a background job holds no call open");
     let sleeping =
         "for p in /proc/[0-9]*; do cat $p/comm 2>/dev/null; done | grep -cx sleep || true";
     assert_eq!(run(&mut session, sleeping).await, "0\n", "the sweep killed it");
     assert_eq!(run(&mut session, "cat f").await, "kept\n", "files last for the episode");
     session.reset(again).await;
-    assert_eq!(run(&mut session, "ls -A; ls -A /tmp").await, "", "even under the same episode_id");
+    let left = "find /work /tmp /run/lock /dev/mqueue -mindepth 1";
+    assert_eq!(run(&mut session, left).await, "", "even under the same episode_id");
 }
 
 #[tokio::test]

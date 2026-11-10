@@ -98,6 +98,8 @@ played by a model, and clock `events`. The field docs are in [src/manifest.rs](s
 [src/task.rs](src/task.rs), and [fixtures/](fixtures) has full examples for Postgres, MySQL and
 several apps. Run `miroir check` until it passes: it replays each golden run, an empty submit,
 repeats and probes, and checks that the env idles, resets cleanly and writes only to its state.
+Runs that call `run_code` need a sandbox: [sandbox/check.sh](sandbox/check.sh) runs the check
+beside one.
 
 ## Serve
 
@@ -117,9 +119,11 @@ One container runs one episode at a time; for parallel rollouts, run several.
 | `MIROIR_PORT` | port to serve on, 8000 by default |
 | `MIROIR_SANDBOX` | `http://HOST:PORT` of a `miroir sandbox` container, which enables `run_code` |
 | `MIROIR_LOG_BUDGET_MB` | change-log size past which an episode faults, 1024 by default |
+| `MIROIR_ENV_VERSION` | version `/metadata` reports, such as the product image's tag; unset, null |
 
 Run the env on an internal network, since nothing outside the sinks is recorded or blocked.
-[python/tests/docker.sh](python/tests/docker.sh) starts an env with its sandbox that way.
+[python/tests/docker.sh](python/tests/docker.sh) starts an env with its sandbox, and cuts off only
+the sandbox: the env stays on Docker's bridge, which publishes its port.
 
 ## Train and evaluate
 
@@ -149,7 +153,7 @@ trainer = GRPOTrainer(
 verifiers:
 
 ```sh
-vf-eval miroir-verifiers -m <model> --env.taskset.urls_file urls.txt
+vf-run miroir-verifiers -m <model> --env.taskset.urls_file urls.txt
 ```
 
 On the host, `miroir` is the Python CLI. Inside the image, it is the Rust binary.
