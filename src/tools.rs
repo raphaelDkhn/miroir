@@ -131,7 +131,7 @@ impl Tools {
                 None => None,
             };
             let description = manifest.apps.get(name).and_then(|app| app.description.clone());
-            let omit = api.omit.clone();
+            let omit = api.omitted();
             apps.insert(name.to_string(), Endpoint { base, description, docs, omit });
         }
         Ok(Tools { client: http_client()?, apps })

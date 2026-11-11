@@ -623,11 +623,36 @@ fn validate_api(api: &Api) -> Result<(), String> {
         ensure(openapi.is_absolute(), "api.openapi must be an absolute path")?;
     }
     for pattern in &api.omit {
-        let parts: Vec<&str> = pattern.split('.').collect();
-        let named = parts.len() <= 2 && parts.iter().all(|part| !part.is_empty());
-        ensure(named, format!("api.omit '{pattern}' must be a key or parent.key"))?;
+        let named = braced(pattern).iter().all(|each| {
+            let parts: Vec<&str> = each.split('.').collect();
+            parts.len() <= 2
+                && parts.iter().all(|part| !part.is_empty())
+                && !each.contains(['{', '}'])
+        });
+        let message =
+            format!("api.omit '{pattern}' must be a key or parent.key, with {{a,b}} for either");
+        ensure(named, message)?;
     }
     Ok(())
+}
+
+impl Api {
+    /// The `omit` patterns, each `{a,b}` written out as its alternatives.
+    pub fn omitted(&self) -> Vec<String> {
+        self.omit.iter().flat_map(|pattern| braced(pattern)).collect()
+    }
+}
+
+fn braced(pattern: &str) -> Vec<String> {
+    let Some((head, rest)) = pattern.split_once('{') else { return vec![pattern.to_string()] };
+    let Some((alternatives, tail)) = rest.split_once('}') else {
+        return vec![pattern.to_string()];
+    };
+    let tails = braced(tail);
+    alternatives
+        .split(',')
+        .flat_map(|alternative| tails.iter().map(move |tail| format!("{head}{alternative}{tail}")))
+        .collect()
 }
 
 fn validate_database(database: &Database) -> Result<(), String> {
@@ -859,11 +884,23 @@ sinks: {smtp: 2525, http: 9000, responses: {"POST /v1/x": {json: {}}, "/hooks/*"
             ("{crm: {Authorization", "{ghost: {Authorization", "headers for 'ghost'"),
             ("3000\"}\n", "3000\", omit: [a.b.c]}\n", "api.omit 'a.b.c' must be a key or"),
             ("3000\"}\n", "3000\", omit: [.url]}\n", "api.omit '.url' must be a key or"),
+            ("3000\"}\n", "3000\", omit: ['{a,b']}\n", "api.omit '{a,b' must be a key or"),
+            ("3000\"}\n", "3000\", omit: ['{a.b,c}.d']}\n", "api.omit '{a.b,c}.d' must be"),
         ];
         for (from, to, expected) in refused {
             let err = manifest_err(from, to);
             assert!(err.contains(expected), "{to}: expected '{expected}', got '{err}'");
         }
+        let braced = MANIFEST.replacen(
+            "3000\"}\n",
+            "3000\", omit: [html_url, '{user,assignee}.{email,created}']}\n",
+            1,
+        );
+        let parsed = manifest(&braced).unwrap();
+        assert_eq!(
+            parsed.apps["crm"].api.as_ref().unwrap().omitted(),
+            ["html_url", "user.email", "user.created", "assignee.email", "assignee.created"]
+        );
         let no_api = MANIFEST.replacen("    api: {base_url: \"http://127.0.0.1:3000\"}\n", "", 1);
         let err = manifest(&no_api).unwrap_err();
         assert!(err.contains("at least one app must have an api"), "{err}");

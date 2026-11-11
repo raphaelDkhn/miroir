@@ -67,7 +67,7 @@ and at least one has a `database`.
 | `description` | what the app is; required when several apps have an `api` |
 | `api.base_url` | the API's `http://` URL on loopback |
 | `api.openapi` | the absolute path of its OpenAPI spec, JSON or YAML, which `api_docs` serves |
-| `api.omit` | keys dropped from its JSON answers, at any depth: `key`, or `parent.key` for a key of an object under `parent`; `*` matches any run of characters |
+| `api.omit` | keys dropped from its JSON answers, at any depth: `key`, or `parent.key` for a key of an object under `parent`; `*` matches any run of characters, and `{a,b}` either |
 | `mcp.url` | the `http://` URL on loopback of its [MCP server](../features/mcp.md); one app at most |
 | `database.url` | a `postgres://`, `postgresql://` or `mysql://` URL that names a database |
 | `database.schemas` | the schemas to read; all of them when unset |
