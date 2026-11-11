@@ -372,7 +372,18 @@ pub fn writable_roots(
     roots.sort();
     Ok(roots)
 }
-const UNSCANNED: [&str; 6] = ["/run", "/proc", "/sys", "/dev", "/var/log", "/miroir"];
+/// The container runtime mounts the last three and touches them, as `docker cp` does.
+const UNSCANNED: [&str; 9] = [
+    "/run",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/var/log",
+    "/miroir",
+    "/etc/hostname",
+    "/etc/hosts",
+    "/etc/resolv.conf",
+];
 
 /// Each path's mtime, ctime, size and inode.
 pub type Scan = BTreeMap<PathBuf, (i64, i64, u64, u64)>;
