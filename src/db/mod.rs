@@ -468,7 +468,8 @@ fn map_batches(pairs: &[(String, String)]) -> Result<Vec<String>, DbError> {
     Ok(batches)
 }
 
-fn glob(pattern: &str, text: &str) -> bool {
+/// Whether `text` matches `pattern`, where `*` stands for any run of characters.
+pub fn glob(pattern: &str, text: &str) -> bool {
     let mut parts = pattern.split('*');
     let Some(mut rest) = text.strip_prefix(parts.next().unwrap_or_default()) else {
         return false;

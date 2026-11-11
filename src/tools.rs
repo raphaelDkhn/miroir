@@ -13,6 +13,7 @@ use reqwest::header::{
 use reqwest::{Method, StatusCode, Url};
 use serde_json::{Map, Value, json};
 
+use crate::db::glob;
 use crate::manifest::{Manifest, Persona};
 
 /// Most bytes of a body or output a tool returns.
@@ -106,6 +107,7 @@ struct Endpoint {
     base: Url,
     description: Option<String>,
     docs: Option<Vec<Operation>>,
+    omit: Vec<String>,
 }
 
 struct Operation {
@@ -129,7 +131,8 @@ impl Tools {
                 None => None,
             };
             let description = manifest.apps.get(name).and_then(|app| app.description.clone());
-            apps.insert(name.to_string(), Endpoint { base, description, docs });
+            let omit = api.omit.clone();
+            apps.insert(name.to_string(), Endpoint { base, description, docs, omit });
         }
         Ok(Tools { client: http_client()?, apps })
     }
@@ -263,7 +266,8 @@ impl Tools {
         if let Some(bytes) = encoded {
             request = request.body(bytes);
         }
-        let (status, answered, body) = exchange(request, BODY_LIMIT).await?;
+        // Read past the limit so a JSON body can shrink to fit it once keys are omitted.
+        let (status, answered, body) = exchange(request, FORWARD_LIMIT).await?;
         let mut headers = Map::new();
         for name in ["content-type", "location", "link"] {
             if let Some(value) = answered.get(name).and_then(|v| v.to_str().ok()) {
@@ -273,16 +277,22 @@ impl Tools {
         let is_json =
             headers.get("content-type").and_then(Value::as_str).is_some_and(|t| t.contains("json"));
         let mut result = json!({"status": status.as_u16(), "headers": headers});
-        if body.len() > BODY_LIMIT {
+        let parsed = if is_json { serde_json::from_slice::<Value>(&body).ok() } else { None };
+        if let Some(mut parsed) = parsed {
+            omit(&mut parsed, &endpoint.omit, None);
+            let (shown, truncated) = fit(parsed);
+            result["body"] = shown;
+            if let Some(truncated) = truncated {
+                result["truncated"] = truncated;
+            }
+        } else if body.len() > BODY_LIMIT {
             result["body"] =
                 Value::String(String::from_utf8_lossy(&body[..BODY_LIMIT]).into_owned());
             result["truncated"] = Value::Bool(true);
         } else if body.is_empty() {
             result["body"] = Value::Null;
         } else {
-            let parsed = if is_json { serde_json::from_slice(&body).ok() } else { None };
-            result["body"] = parsed
-                .unwrap_or_else(|| Value::String(String::from_utf8_lossy(&body).into_owned()));
+            result["body"] = Value::String(String::from_utf8_lossy(&body).into_owned());
         }
         Ok(result)
     }
@@ -487,6 +497,58 @@ fn fits(template: &str, path: &str) -> Option<usize> {
     Some(literal)
 }
 
+/// Drop the keys `patterns` name, at any depth: `key`, or `parent.key` for a key of an object
+/// held under `parent`, through arrays.
+fn omit(value: &mut Value, patterns: &[String], parent: Option<&str>) {
+    match value {
+        Value::Object(fields) => {
+            fields.retain(|key, _| {
+                !patterns.iter().any(|pattern| match pattern.split_once('.') {
+                    Some((above, name)) => {
+                        parent.is_some_and(|parent| glob(above, parent)) && glob(name, key)
+                    }
+                    None => glob(pattern, key),
+                })
+            });
+            for (key, field) in fields.iter_mut() {
+                omit(field, patterns, Some(key));
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                omit(item, patterns, parent);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A JSON body within `BODY_LIMIT`, and what was cut to fit: an array keeps its first items,
+/// anything else becomes its cut text.
+fn fit(body: Value) -> (Value, Option<Value>) {
+    let text = body.to_string();
+    if text.len() <= BODY_LIMIT {
+        return (body, None);
+    }
+    let Value::Array(items) = body else {
+        return (Value::String(cut(&text, BODY_LIMIT).to_string()), Some(Value::Bool(true)));
+    };
+    let total = items.len();
+    let mut size = 2;
+    let kept: Vec<Value> = items
+        .into_iter()
+        .take_while(|item| {
+            size += item.to_string().len() + 1;
+            size <= BODY_LIMIT
+        })
+        .collect();
+    let note = format!(
+        "only the first {} of these {total} items fit; ask for fewer at a time to see the others",
+        kept.len()
+    );
+    (Value::Array(kept), Some(Value::String(note)))
+}
+
 fn cap(value: Value) -> Value {
     let text = serde_json::to_string_pretty(&value).unwrap_or_default();
     if text.len() <= BODY_LIMIT {
@@ -679,7 +741,40 @@ mod tests {
     use super::*;
 
     fn endpoint(base: &str, docs: Option<Vec<Operation>>) -> Endpoint {
-        Endpoint { base: Url::parse(base).unwrap(), description: None, docs }
+        Endpoint { base: Url::parse(base).unwrap(), description: None, docs, omit: Vec::new() }
+    }
+
+    #[test]
+    fn omitted_keys_leave_at_any_depth_and_a_parent_narrows_them() {
+        let mut body = json!([
+            {"number": 1, "html_url": "h", "user": {"login": "dana", "avatar_url": "a"},
+             "head": {"ref": "fix", "repo": {"id": 7}}, "repo": "kept",
+             "assignees": [{"login": "ravi", "avatar_url": "a"}]},
+        ]);
+        let patterns = ["*_url".to_string(), "head.repo".to_string()];
+        omit(&mut body, &patterns, None);
+        assert_eq!(
+            body,
+            json!([{"number": 1, "user": {"login": "dana"}, "head": {"ref": "fix"},
+                    "repo": "kept", "assignees": [{"login": "ravi"}]}])
+        );
+    }
+
+    #[test]
+    fn a_long_array_keeps_the_items_that_fit_and_says_how_many() {
+        let item = json!({"text": "x".repeat(1000)});
+        let items = vec![item.clone(); 100];
+        let (shown, truncated) = fit(Value::Array(items));
+        let kept = shown.as_array().unwrap().len();
+        assert!(shown.to_string().len() <= BODY_LIMIT, "fits the limit");
+        assert_eq!(kept, (BODY_LIMIT - 2) / (item.to_string().len() + 1));
+        let note = truncated.unwrap();
+        assert!(note.as_str().unwrap().starts_with(&format!("only the first {kept} of these 100")));
+        let (small, none) = fit(json!([1, 2]));
+        assert_eq!((small, none), (json!([1, 2]), None));
+        let (text, cut_off) = fit(json!({"text": "x".repeat(BODY_LIMIT)}));
+        assert_eq!(text.as_str().unwrap().len(), BODY_LIMIT);
+        assert_eq!(cut_off, Some(json!(true)));
     }
 
     fn tools(openapi: Option<&Path>) -> Tools {

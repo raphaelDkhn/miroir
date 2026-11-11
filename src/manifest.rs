@@ -177,6 +177,9 @@ pub struct Api {
     pub base_url: String,
     /// Path of its `OpenAPI` spec, which `api_docs` serves.
     pub openapi: Option<PathBuf>,
+    /// Keys dropped from its JSON answers at any depth: `key` or `parent.key` globs.
+    #[serde(default)]
+    pub omit: Vec<String>,
 }
 
 /// A user the agent acts as.
@@ -619,6 +622,11 @@ fn validate_api(api: &Api) -> Result<(), String> {
     if let Some(openapi) = &api.openapi {
         ensure(openapi.is_absolute(), "api.openapi must be an absolute path")?;
     }
+    for pattern in &api.omit {
+        let parts: Vec<&str> = pattern.split('.').collect();
+        let named = parts.len() <= 2 && parts.iter().all(|part| !part.is_empty());
+        ensure(named, format!("api.omit '{pattern}' must be a key or parent.key"))?;
+    }
     Ok(())
 }
 
@@ -849,6 +857,8 @@ sinks: {smtp: 2525, http: 9000, responses: {"POST /v1/x": {json: {}}, "/hooks/*"
             (crm_db, "", "at least one app must have a database"),
             ("    api: {base_url", "    unused: {base_url", "unknown field"),
             ("{crm: {Authorization", "{ghost: {Authorization", "headers for 'ghost'"),
+            ("3000\"}\n", "3000\", omit: [a.b.c]}\n", "api.omit 'a.b.c' must be a key or"),
+            ("3000\"}\n", "3000\", omit: [.url]}\n", "api.omit '.url' must be a key or"),
         ];
         for (from, to, expected) in refused {
             let err = manifest_err(from, to);

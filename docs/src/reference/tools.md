@@ -16,8 +16,9 @@ Sends an HTTP request to the app's API as the persona.
 | `headers` | extra headers, as an object of strings; at most 100 |
 
 Returns the `status`, the `content-type`, `location` and `link` `headers`, and the `body`:
-parsed when it is JSON, else text, or `null` when empty. A body over 64 KiB is cut, with
-`truncated: true`.
+parsed when it is JSON, without the keys `api.omit` names, else text, or `null` when empty.
+A body over 64 KiB is cut to fit. A JSON array keeps its first items, and `truncated` says how
+many of how many; any other body is cut as text, with `truncated: true`.
 
 The persona's headers win over the agent's. Paths can't leave the API, such as with `..`.
 Redirects are not followed, and a request times out after 30 seconds.

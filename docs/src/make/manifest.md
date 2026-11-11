@@ -71,6 +71,11 @@ Each app has an `api`, a `database`, an [MCP server](../features/mcp.md), or sev
 
 - `api.base_url` is where the agent's requests go. `api.openapi` is the spec `api_docs`
   serves.
+- `api.omit` lists keys to drop from the API's JSON answers before the agent sees them, such
+  as links and avatars repeated in every object. Each answer's tokens stay in the agent's
+  context for the rest of the episode, and in every training sample. A key matches at any
+  depth; `parent.key` matches only in an object held under `parent`, so `head.repo` drops a
+  pull request's copy of its repository and keeps an activity's `repo`.
 - `database.url` is where grading reads net changes and runs checks. Connect as a user that
   can create triggers: bake installs triggers that log every row change.
 - `database.ignore` lists tables, or `table.column`s, whose changes never count, such as a
