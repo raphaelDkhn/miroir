@@ -50,9 +50,11 @@ def start(client: SandboxClient, image: str) -> str:
             name=name,
             docker_image=image,
             start_command=StartCommand(executable="/bin/sh", args=["-c", START]),
-            cpu_cores=2,
-            memory_gb=2,
-            disk_size_gb=10,
+            # Prime bills each vCPU and GiB by the hour. The env holds about 220 MiB, and one
+            # vCPU slows a reset from about 3.7 s to 5 s, little next to a rollout's minutes.
+            cpu_cores=1,
+            memory_gb=1,
+            disk_size_gb=5,
             timeout_minutes=LIFETIME_MIN,
             secrets={"MIROIR_TOKEN": token},
             # The env needs no egress: the product's mail and webhooks go to miroir's sinks.
