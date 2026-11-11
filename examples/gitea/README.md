@@ -20,7 +20,7 @@ product.
 | 2 | Every task is solvable and graded right | `miroir check` on all 144 tasks | 144 of 144 pass: golden runs earn 1, empty submits 0, repeats the same; 360 of 360 probes stay in bounds |
 | 3 | Episodes don't leak into each other | `check`'s `reset` and `writes` stages | 576 resets, and in each world every one hashes the same; no file written outside the state |
 | 4 | Collateral damage is caught | probes that do the task and damage something else | 144 probes do harm, and every one earns `harm_reward` |
-| 5 | It is fast enough to train on | `check`'s timings, and a soak of a pool of containers | reset 3.7 s and grading 1.6 s at the median; eight containers on one laptop ran 65 episodes a minute, none void |
+| 5 | It is fast enough to train on | `check`'s timings, a soak of a pool of containers, and what a model reads | reset 3.7 s and grading 1.6 s at the median; eight containers on one laptop ran 65 episodes a minute, none void; rollouts past a 32k context fell from 31% to 12% |
 | 6 | Training on it improves held-out work | RL on the train split, scored on held-out worlds and families | not run yet: [the experiment](#6-training-improves-held-out-work) is ready, with its decision rule |
 
 ## What the env holds
@@ -171,6 +171,39 @@ uv run tools/scale_run.py --urls urls.txt --tasks gitea-tasks --concurrency 8 --
 That leaves the time to the model. In the first training run on an earlier version of this env,
 a step of 40 rollouts took 469 s at the median, with about 17 model turns per rollout; the env's
 part of an episode, a reset and a grading, is about 5 s of that.
+
+### What the model reads
+
+What the model reads costs more than what the env does. Every API answer stays in the context
+for the rest of the episode and goes into the sample training learns from, and Gitea's
+answers are long: each pull request holds two full copies of its repository, each user their
+account settings and avatar link. A list of 50 pull requests was 73 KB, 23,600 tokens, past
+the 64 KiB at which Miroir cuts an answer. The manifest's `api.omit` drops what the agent
+can't use before it sees it: links to avatars, clones and downloads, the repository copies,
+migration fields, label colors, and a user's account details beyond who they are. Each key
+names nothing else in Gitea's spec, or is limited to users by the key it sits under. A list
+that still doesn't fit keeps its first items as JSON, and says how many it left out.
+
+| | Gitea's answers | With `api.omit` |
+|---|---|---|
+| observation tokens in the golden runs of orbit's 44 tasks | 463,084 | 158,878 (-66%) |
+| answers cut at 64 KiB in those runs | 9 | 0 |
+| Qwen3.5-9B on the 54 train tasks: mean reward | 0.45 | 0.57 |
+| rollouts past a 32,768-token context, which training cuts | 31% | 12% |
+| tokens at the end of a rollout, at the median | 24,800 | 14,400 |
+
+Paired by task, the reward rose by 0.12, with a standard error of 0.05. It rose where whole
+lists now fit: `merge-ready` from 0 to 0.64, `stale-prs` from 0.48 to 1. It fell on
+`add-webhook`, from 0.60 to 0.33 over nine rollouts, and on `triage`, from 0.80 to 0.67;
+`offboard` stays at 0, as the model lists every issue of every repository instead of filtering
+by assignee and passes the context each time. Two cuts were tried and put back because they
+cost reward: an issue's web link, whose `/pulls/` path is how the model told a pull request
+from an issue when counting issues, and a shorter `api_docs` listing, after which it made more
+failing calls on `add-webhook`.
+
+The rollouts ran on Prime Inference with thinking off and sampling at temperature 1, as
+[`rl.toml`](rl.toml) trains, with up to 4,096 tokens a turn: 205 on Gitea's answers and 122
+with `api.omit`, one to three for each task.
 
 ## 6. Training improves held-out work
 
@@ -343,7 +376,8 @@ learnable or out of reach for a model; `train.py --calibration calibration.json`
   SMTP sink and its webhooks at the HTTP sink, the only host they may reach. It turns off every
   cron task, keeps queues and sessions in memory, and searches issues in the database.
 - **The manifest.** Postgres and Gitea, each as its own user; three worlds; the state; Gitea's
-  API with the part of its spec `api_docs` serves; one persona per world, the company's
+  API with the part of its spec `api_docs` serves, and the keys its answers leave out
+  (`api.omit`); one persona per world, the company's
   engineering manager; the sinks. The changes that follow from others (the activity feed,
   notifications, webhook deliveries, a token's last use) are ignored, and `quiet` waits for
   Gitea's queues to drain before grading.
