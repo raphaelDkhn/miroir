@@ -32,8 +32,10 @@ Looks up the API in its OpenAPI spec. Listed when an app sets `api.openapi`.
 | `operation` | an operation ID, or `METHOD /path` such as `GET /deals/1100`; leave it out to list every operation |
 
 Without `operation`, returns `operations`: each operation's `operation` ID, `method`, `path`
-and `summary`. With one, returns its `summary`, `description`, `parameters`, `request_body`
-and `responses`, with `$ref`s resolved.
+and `summary`. With one, returns its `operation` ID, `summary`, `description`, `parameters`,
+`request_body` and `responses`. A `$ref` used once is replaced by what it points at; one used more stays,
+and `schemas` shows each such schema once, by its `$ref`. go-swagger's `x-go-name` and
+`x-go-package`, which name its generated code, are left out.
 
 ## `run_code`
 

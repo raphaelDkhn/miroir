@@ -20,8 +20,8 @@ use crate::manifest::{Manifest, Persona};
 pub const BODY_LIMIT: usize = 64 * 1024;
 const HEADER_LIMIT: usize = 100;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const REF_DEPTH: usize = 5;
-const REF_BUDGET: usize = 64 * 1024;
+/// Spec keys that only name the generator's own code, as go-swagger adds to every field.
+const CODEGEN: [&str; 2] = ["x-go-name", "x-go-package"];
 /// Most bytes of a body the code proxy forwards.
 pub const FORWARD_LIMIT: usize = 8 * 1024 * 1024;
 const HOP_BY_HOP: [&str; 7] =
@@ -310,6 +310,7 @@ impl Tools {
         })?;
         let result = match args.get("operation") {
             None => {
+                // Kept as objects: Qwen3.5-9B made more failing calls from a one-line listing.
                 let list: Vec<Value> = docs
                     .iter()
                     .map(|op| {
@@ -679,28 +680,27 @@ fn load_docs(path: &Path) -> Result<Vec<Operation>, String> {
         .ok_or_else(|| format!("{}: no paths", path.display()))?;
     let mut operations = Vec::new();
     for (route, item) in paths {
-        let mut budget = REF_BUDGET;
-        let shared =
-            item.get("parameters").map_or_else(|| json!([]), |p| resolve(p, &root, 0, &mut budget));
+        let shared = item.get("parameters").and_then(Value::as_array).cloned().unwrap_or_default();
         for method in ["get", "put", "post", "delete", "patch", "head", "options"] {
             let Some(op) = item.get(method) else { continue };
-            let mut budget = REF_BUDGET;
-            let op = resolve(op, &root, 0, &mut budget);
-            let mut parameters = shared.as_array().cloned().unwrap_or_default();
+            let mut parameters = shared.clone();
             parameters.extend(
                 op.get("parameters").and_then(Value::as_array).cloned().unwrap_or_default(),
             );
             let text = |key: &str| op.get(key).and_then(Value::as_str).map(str::to_string);
-            let detail = json!({
-                "operation": text("operationId"),
-                "method": method.to_uppercase(),
-                "path": route,
-                "summary": text("summary"),
-                "description": text("description"),
-                "parameters": parameters,
-                "request_body": op.get("requestBody"),
-                "responses": op.get("responses"),
-            });
+            let detail = resolved(
+                &json!({
+                    "operation": text("operationId"),
+                    "method": method.to_uppercase(),
+                    "path": route,
+                    "summary": text("summary"),
+                    "description": text("description"),
+                    "parameters": parameters,
+                    "request_body": op.get("requestBody"),
+                    "responses": op.get("responses"),
+                }),
+                &root,
+            );
             operations.push(Operation {
                 id: text("operationId"),
                 method: method.to_uppercase(),
@@ -713,24 +713,71 @@ fn load_docs(path: &Path) -> Result<Vec<Operation>, String> {
     Ok(operations)
 }
 
-fn resolve(value: &Value, root: &Value, depth: usize, budget: &mut usize) -> Value {
-    *budget = budget.saturating_sub(1);
+/// An operation's detail with its `$ref`s resolved: one used once is inlined, and one used
+/// more stays a `$ref`, its schema shown once under `schemas`.
+fn resolved(detail: &Value, root: &Value) -> Value {
+    let mut uses = BTreeMap::new();
+    tally(detail, root, &mut uses);
+    let mut schemas = Map::new();
+    let mut shown = emit(detail, root, &uses, &mut schemas);
+    if !schemas.is_empty() {
+        shown["schemas"] = Value::Object(schemas);
+    }
+    shown
+}
+
+/// The local `$ref` an object is, and what it points at.
+fn reference<'a>(map: &'a Map<String, Value>, root: &'a Value) -> Option<(&'a str, &'a Value)> {
+    let reference = map.get("$ref")?.as_str()?;
+    let target = root.pointer(reference.strip_prefix('#')?)?;
+    Some((reference, target))
+}
+
+/// Count the uses of each `$ref`, walking each one's target once.
+fn tally(value: &Value, root: &Value, uses: &mut BTreeMap<String, usize>) {
     match value {
-        Value::Object(map) => {
-            if let Some(Value::String(reference)) = map.get("$ref")
-                && depth < REF_DEPTH
-                && *budget > 0
-                && let Some(target) =
-                    reference.strip_prefix('#').and_then(|pointer| root.pointer(pointer))
-            {
-                return resolve(target, root, depth + 1, budget);
+        Value::Object(map) => match reference(map, root) {
+            Some((name, target)) => {
+                let count = uses.entry(name.to_string()).or_insert(0);
+                *count += 1;
+                if *count == 1 {
+                    tally(target, root, uses);
+                }
             }
-            let resolved: BTreeMap<String, Value> =
-                map.iter().map(|(k, v)| (k.clone(), resolve(v, root, depth, budget))).collect();
-            Value::Object(resolved.into_iter().collect())
-        }
+            None => map.values().for_each(|field| tally(field, root, uses)),
+        },
+        Value::Array(items) => items.iter().for_each(|item| tally(item, root, uses)),
+        _ => {}
+    }
+}
+
+/// A `$ref` in a cycle is used at least twice, so inlining the ones used once ends.
+fn emit(
+    value: &Value,
+    root: &Value,
+    uses: &BTreeMap<String, usize>,
+    schemas: &mut Map<String, Value>,
+) -> Value {
+    match value {
+        Value::Object(map) => match reference(map, root) {
+            Some((name, target)) if uses.get(name) == Some(&1) => emit(target, root, uses, schemas),
+            Some((name, target)) => {
+                if !schemas.contains_key(name) {
+                    schemas.insert(name.to_string(), Value::Null);
+                    let schema = emit(target, root, uses, schemas);
+                    schemas.insert(name.to_string(), schema);
+                }
+                json!({"$ref": name})
+            }
+            None => Value::Object(
+                map.iter()
+                    .filter(|(key, _)| !CODEGEN.contains(&key.as_str()))
+                    .map(|(key, field)| (key.clone(), emit(field, root, uses, schemas)))
+                    .collect(),
+            ),
+        },
         Value::Array(items) => {
-            Value::Array(items.iter().map(|v| resolve(v, root, depth, budget)).collect())
+            Value::Array(items.iter().map(|item| emit(item, root, uses, schemas)).collect())
         }
         other => other.clone(),
     }
@@ -1079,9 +1126,10 @@ paths:
     patch:
       operationId: updateDeal
       requestBody: {content: {application/json: {schema: {$ref: '#/components/schemas/Deal'}}}}
+      responses: {'200': {headers: {x-total-count: {schema: {type: integer}}}}}
 components:
   parameters:
-    Id: {name: id, in: path}
+    Id: {name: id, in: path, x-go-name: ID, x-go-enum-desc: 'kept: it explains values'}
   schemas:
     Deal: {type: object, properties: {owner: {$ref: '#/components/schemas/Deal'}}}
 ";
@@ -1102,13 +1150,20 @@ components:
         let by_route =
             tools.api_docs(json!({"operation": "patch /deals/{id}"}).as_object().unwrap()).unwrap();
         assert_eq!(by_id, by_route);
-        assert_eq!(by_id["parameters"][0]["name"], "id");
+        assert_eq!(
+            by_id["parameters"][0],
+            json!({"name": "id", "in": "path", "x-go-enum-desc": "kept: it explains values"}),
+            "the generator's field name goes; what describes the API stays"
+        );
+        assert!(by_id["responses"]["200"]["headers"]["x-total-count"].is_object());
+        let deal = "#/components/schemas/Deal";
         let schema = &by_id["request_body"]["content"]["application/json"]["schema"];
-        let mut level = schema;
-        for _ in 0..4 {
-            level = &level["properties"]["owner"];
-        }
-        assert_eq!(level["properties"]["owner"]["$ref"], "#/components/schemas/Deal");
+        assert_eq!(schema, &json!({"$ref": deal}), "a schema used twice stays a reference");
+        assert_eq!(
+            by_id["schemas"],
+            json!({deal: {"type": "object", "properties": {"owner": {"$ref": deal}}}}),
+            "and is shown once"
+        );
         let unknown =
             tools.api_docs(json!({"operation": "nope"}).as_object().unwrap()).unwrap_err();
         assert_eq!(unknown.error_type, "invalid_args");
@@ -1145,17 +1200,20 @@ paths:
     }
 
     #[test]
-    fn schemas_that_reference_each_other_stay_within_the_budget() {
+    fn schemas_that_reference_each_other_are_each_shown_once() {
         let references: Vec<Value> =
             (0..20).map(|i| json!({"$ref": format!("#/components/schemas/S{i}")})).collect();
         let schemas: Map<String, Value> =
             (0..20).map(|i| (format!("S{i}"), json!({"anyOf": references}))).collect();
         let root = json!({"components": {"schemas": schemas}});
-        let started = std::time::Instant::now();
-        let mut budget = REF_BUDGET;
-        let resolved = resolve(&references[0], &root, 0, &mut budget);
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "20^5 expansions");
-        assert!(resolved.to_string().contains("$ref"), "the rest stays as references");
+        let shown = resolved(&json!({"schema": references[0], "once": {"$ref": "#/x"}}), &root);
+        assert_eq!(shown["schema"], references[0]);
+        assert_eq!(shown["schemas"].as_object().unwrap().len(), 20);
+        assert_eq!(shown["schemas"]["#/components/schemas/S7"], json!({"anyOf": references}));
+        assert_eq!(shown["once"], json!({"$ref": "#/x"}), "a reference to nothing stays");
+        let single = json!({"components": {"schemas": {"S0": {"type": "string"}}}});
+        let inlined = resolved(&json!({"schema": references[0]}), &single);
+        assert_eq!(inlined, json!({"schema": {"type": "string"}}), "a schema used once is inlined");
     }
 
     #[test]
