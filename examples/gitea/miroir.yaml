@@ -39,6 +39,15 @@ apps:
     api:
       base_url: http://127.0.0.1:3000/api/v1
       openapi: /opt/gitea-env/openapi.json
+      # What the agent can't use and every object repeats: links to web pages and downloads
+      # outside the API, each pull request's two copies of its repository, the fields of
+      # migrated content, label colors, issues' edit versions, pins and estimates, and a
+      # user's account details beyond who they are. Each key names nothing else in the spec.
+      omit: [html_url, avatar_url, clone_url, ssh_url, diff_url, patch_url, original_url,
+             languages_url, tarball_url, zipball_url, upload_url, browser_download_url,
+             head.repo, base.repo, original_author, original_author_id, color, content_version,
+             pin_order, time_estimate, login_name, source_id, last_login, prohibit_login,
+             restricted, followers_count, following_count, starred_repos_count, pronouns]
     database:
       url: postgres://postgres@127.0.0.1:5432/gitea
       # What follows from other changes: the activity feed, notifications, read marks, webhook
