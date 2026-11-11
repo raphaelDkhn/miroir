@@ -264,7 +264,12 @@ class MiroirEnv:
         step = self._calls.submit(self._step, tool, arguments).result()
         observation = step["observation"]
         error = observation["error"]
-        shown = json.dumps(observation["result"] if error is None else error)
+        # As the env's MCP server shows it: Python's spaces and \u escapes would cost tokens.
+        shown = json.dumps(
+            observation["result"] if error is None else error,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
         if step["done"]:
             self.done = True
             return f"{shown}\n\nThat was the last tool call: {EPISODE_OVER}."

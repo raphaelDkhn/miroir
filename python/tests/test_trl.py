@@ -255,6 +255,20 @@ def test_without_a_coworker_model_an_env_answers_for_nobody():
     assert "coworkers" not in lease.log
 
 
+class AccentedSession(FlakySession):
+    def step(self, tool: str, arguments: dict) -> dict:
+        result = {"status": 200, "body": [{"login": "ines", "full_name": "Inès Moreau"}]}
+        return {"observation": {"result": result, "error": None}, "done": False}
+
+
+def test_a_result_reaches_the_model_as_compact_json_with_its_own_letters():
+    with patch.object(Session, "lease", return_value=AccentedSession()):
+        env = MiroirEnv(["http://127.0.0.1:9"])
+        env.reset(**ROW)
+        shown = env.api_request("GET", "/orgs/orbit/members")
+    assert shown == '{"status":200,"body":[{"login":"ines","full_name":"Inès Moreau"}]}'
+
+
 def test_a_coworker_the_model_cant_answer_for_voids_the_rollout():
     model = FakeModel(status=500)
     try:
