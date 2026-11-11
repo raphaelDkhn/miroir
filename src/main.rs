@@ -35,6 +35,7 @@ use clap::{Parser, Subcommand};
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::env::{Env, EnvError, Paths};
+use crate::manifest::Manifest;
 
 /// Turn a product's container into an RL environment.
 #[derive(Parser)]
@@ -101,10 +102,15 @@ async fn dispatch(command: Command) -> anyhow::Result<()> {
 
 async fn bake() -> anyhow::Result<()> {
     let paths = Paths::default();
-    let (manifest, _) = env::load(&paths)?;
+    let manifest = Manifest::load(&paths.manifest())?;
+    // Tasks already in the image fail the build before a long bake; a seed may write the rest.
+    if task::has_task_files(&paths.tasks())? {
+        manifest.load_tasks(&paths.tasks())?;
+    }
     sinks::start(&manifest.sinks, None).await.context("cannot start the sinks")?;
     bake::run(&paths, &manifest).await?;
-    tracing::info!("bake finished");
+    let tasks = manifest.load_tasks(&paths.tasks())?;
+    tracing::info!(tasks = tasks.len(), "bake finished");
     Ok(())
 }
 

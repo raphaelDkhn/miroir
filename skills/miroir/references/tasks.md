@@ -394,6 +394,15 @@ probes:
   them. A `wait` step in a golden run or probe takes exactly its `minutes`.
 - A clock task can't take a `date` answer, or run in an env with `time.hook`.
 
+## Tasks a seed writes
+
+Checks name rows by the ids the database gave them. A `seed` command can plant the same kind of
+work many times and write the task files to `/miroir/tasks` from the ids it reads back: bake
+validates every task after the seed, so a bad one fails the build. Keep the generator
+deterministic, so each bake writes the same tasks, and give its logic tests that need no
+database. `examples/gitea/seed/` does this for 144 tasks; mount reviewed probes at
+`/miroir/tasks/probes`, since the tasks live in the image.
+
 ## Tasks from traces
 
 Traces of a production agent become tasks in three steps.

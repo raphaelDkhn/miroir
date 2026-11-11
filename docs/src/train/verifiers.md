@@ -54,9 +54,7 @@ The containers must be reachable from Prime, such as a [pool of Prime
 sandboxes](../run/pool.md#on-prime-intellect). The training config names the taskset by its
 Hub id, `env.taskset.id = "<you>/miroir-verifiers"`. Full-parameter runs pass neither
 `prime train -e` variables nor environment secrets to the env, so the pool's URLs and token go
-in the config: with the source table last, as in
-[`examples/gitea/rl.toml`](https://github.com/raphaelDkhn/miroir/blob/master/examples/gitea/rl.toml),
-append them to a copy and dispatch that:
+in the config: with the source table last, append them to a copy and dispatch that:
 
 ```sh
 { cat rl.toml
@@ -65,6 +63,11 @@ append them to a copy and dispatch that:
 } > rl.local.toml
 prime train rl.local.toml
 ```
+
+A config with several sources needs them under each, as the train and eval sources of
+[`examples/gitea/rl.toml`](https://github.com/raphaelDkhn/miroir/blob/master/examples/gitea/rl.toml)
+do; [`examples/gitea/with_pool.py`](https://github.com/raphaelDkhn/miroir/blob/master/examples/gitea/with_pool.py)
+adds them.
 
 The run's config, and its logs (verifiers logs each rollout's MCP URL, which carries the
 token), then hold the token: use a token for the pool alone, and delete the sandboxes when the

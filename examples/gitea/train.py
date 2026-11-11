@@ -16,14 +16,17 @@ from trl import GRPOConfig, GRPOTrainer
 
 
 def main() -> None:
-    """Parse the options, then train on the train split and evaluate on the validation split."""
+    """Parse the options, then train on the train split and evaluate on the validation split:
+    the training worlds' other tasks, and the families training never sees."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", default="Qwen/Qwen3-4B-Instruct-2507")
     parser.add_argument("--urls", default="urls.txt", help="the URL file `miroir pool` writes")
     parser.add_argument("--calibration", help="a `miroir calibrate` file: train on learnable tasks")
     parser.add_argument("--traces", default="traces", help="where to save every episode's record")
     parser.add_argument("--output-dir", default="out/gitea-grpo")
-    parser.add_argument("--coworker-model", help="a chat model that plays Marcus in ask-coworker")
+    parser.add_argument(
+        "--coworker-model", help="a chat model that plays the colleagues of the ask-coworker tasks"
+    )
     parser.add_argument("--coworker-base-url", help="its OpenAI-compatible endpoint")
     args = parser.parse_args()
 

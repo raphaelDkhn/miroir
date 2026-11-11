@@ -1,8 +1,9 @@
 miroir: 1
 name: gitea
 description: >-
-  Gitea 28.3, the self-hosted Git forge, holding the engineering organization of Orbit, a
-  payments company: six repositories, eight teams, and their issues, pull requests and releases
+  Gitea 28.3, the self-hosted Git forge, holding the engineering organization of one of three
+  companies: a payments company and a logistics company to train on, and a clinic-software
+  company held out for test
 processes:
   # TCP only, with no socket in /run, which a VM such as a Prime sandbox mounts empty at boot.
   - name: db
@@ -26,16 +27,18 @@ bake:
      -c, CREATE ROLE gitea LOGIN, -c, CREATE DATABASE gitea OWNER gitea]
   - [su-exec, git, gitea, migrate, --config, /etc/gitea/app.ini]
   - [su-exec, git, gitea, admin, user, create, --config, /etc/gitea/app.ini, --admin,
-     --username, orbit-admin, --email, admin@orbit.test, --random-password,
+     --username, env-admin, --email, admin@env.test, --random-password,
      --must-change-password=false]
+# Builds MIROIR_WORLD's company through Gitea's API, then writes its tasks to /miroir/tasks.
 seed:
-  - [python3, /opt/orbit/seed.py]
+  - [python3, /opt/gitea-env/seed.py]
+worlds: [orbit, ferry, kestrel]
 state: [/var/lib/postgresql/data, /var/lib/gitea]
 apps:
   gitea:
     api:
       base_url: http://127.0.0.1:3000/api/v1
-      openapi: /opt/orbit/openapi.json
+      openapi: /opt/gitea-env/openapi.json
     database:
       url: postgres://postgres@127.0.0.1:5432/gitea
       # What follows from other changes: the activity feed, notifications, read marks, webhook
@@ -45,22 +48,35 @@ apps:
                access_token.updated_unix]
       time:
         epoch: {"*.*_unix": s}
+# One manager per world; each world's seed stores the token of its own.
 personas:
-  eng_manager:
+  dana:
     description: >-
-      Dana Lee (dana), engineering manager at Orbit and an owner of its Gitea organization,
-      orbit
+      Dana Lee (dana), engineering manager at Orbit Payments and an owner of its Gitea
+      organization, orbit
     headers:
-      gitea: {Authorization: token 11964c8449bba23d6f37b8c883725fb9cc838a8e}
+      gitea: {Authorization: token ece66dadd3c117ab0a86bff7cc7b05a9c9e0b7ce}
+  elena:
+    description: >-
+      Elena Petrova (elena), engineering manager at Ferrylane Logistics and an owner of its
+      Gitea organization, ferrylane
+    headers:
+      gitea: {Authorization: token 8fe5394a32fb728adde9e5453cd31df20962d514}
+  rahul:
+    description: >-
+      Rahul Mehta (rahul), engineering manager at Kestrel Health and an owner of its Gitea
+      organization, kestrel
+    headers:
+      gitea: {Authorization: token 1c59c7e2f29234198256fc1464a929bee073503f}
 sinks:
   smtp: 2525
   http: 9000
 quiet:
   command: [su-exec, git, gitea, manager, flush-queues, --config, /etc/gitea/app.ini]
 system_prompt: >-
-  You are an assistant for the engineering team of Orbit, a payments company. You work in
-  Orbit's Gitea, its Git forge, through Gitea's REST API: api_request sends a request as the
-  person you act for, and api_docs looks up the API's operations. Repositories are named
-  orbit/<name>, issues and pull requests share one number sequence in each repository, and
-  lists are paginated with page and limit (at most 50). Do what you are asked and nothing
-  more, then call submit.
+  You are an assistant for a company's engineering team. You work in the company's Gitea, its
+  Git forge, through Gitea's REST API: api_request sends a request as the person you act for,
+  and api_docs looks up the API's operations. Repositories are named <organization>/<name>,
+  issues and pull requests share one number sequence in each repository, and lists are
+  paginated with page and limit (at most 50). Do what you are asked and nothing more, then call
+  submit.

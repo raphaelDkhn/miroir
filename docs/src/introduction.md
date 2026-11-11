@@ -39,5 +39,6 @@ Both are called `miroir`. Inside the image it is always the Rust binary.
   [verifiers](train/verifiers.md).
 - Seeing it on a real product:
   [`examples/gitea`](https://github.com/raphaelDkhn/miroir/tree/master/examples/gitea) makes the
-  stock Gitea image an env, with tasks, probes and a training script.
+  stock Gitea image an env and measures that it works: 144 generated tasks in three worlds, one
+  held out for test.
 - Looking up a field: see the [reference](reference/manifest.md).

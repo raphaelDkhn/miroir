@@ -114,9 +114,10 @@ Tasks can also have probes (runs whose reward must stay in bounds), a typed `ans
 played by a model, and clock `events`. Every field is in the
 [manifest](docs/src/reference/manifest.md) and [task](docs/src/reference/task.md) references, and
 [fixtures/](fixtures) has full examples for Postgres, MySQL and several apps.
-[examples/gitea](examples/gitea) makes the stock Gitea image an env, with twelve tasks for an
-engineering manager's agent, a GRPO training script, and RL on Prime Intellect's Hosted
-Training. Run `miroir check` until it passes: it replays each golden run, an empty submit, repeats and probes, and checks that
+[examples/gitea](examples/gitea) is the evidence on a real product: the stock Gitea image made an
+env whose seed builds three companies and writes 144 tasks, one company held out for test, with
+the measurements that show it grades right and resets exactly, and a ready-to-run RL experiment
+on held-out work. Run `miroir check` until it passes: it replays each golden run, an empty submit, repeats and probes, and checks that
 the env idles, resets cleanly and writes only to its state.
 Runs that call `run_code` need a sandbox: [sandbox/check.sh](sandbox/check.sh) runs the check
 beside one.

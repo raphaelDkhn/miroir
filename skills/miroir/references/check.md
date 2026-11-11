@@ -14,7 +14,8 @@
 | `state` | a root process with no `state` listed; a writable path holding a system directory; a world changing what the processes can write | give each process a user, or list `state`; create the paths in the image before bake |
 | `time` | bake ran past midnight UTC, or `time.captured` is after the bake | build again; fix the instant |
 
-A task that doesn't validate also fails bake, since bake loads the tasks.
+A task that doesn't validate also fails bake: bake validates the tasks in the image before it
+seeds, and every task, those a seed wrote included, after.
 
 ## Check
 
@@ -74,6 +75,7 @@ jq -c '.tasks[] | .id as $id | .probes.runs[]? | {task: $id, name, reward, statu
 | `null` | `gate 'x' fails on an empty submit` | the gate says what must happen; a gate says what must not | make it a weighted check |
 | `repeat` | `rewards differ across runs` or `check 'x' scored 1, 0, 1` | background work not awaited; a check on generated ids, times or row order; random seed data | add `quiet`; check what rows hold, not generated values |
 | `reset` | `the fingerprint after setup changed between resets in T` | something writes at startup: migrations or seeding on boot, a cache or session table; a `setup` that reads the clock or randomness | move the work into `bake`, make startup read-only, or `database.ignore` the table |
+| `reset` | `the fingerprint after setup differs in T from the first reset of this world and setup, for task 'X'` | a run checked between the two left data a reset did not restore, such as a file the state misses | list the directory in `state`; read the earlier tasks' `writes` stage |
 | `writes` | `changed outside the state directories: /path` | the product writes outside its state: logs, caches, a build directory | add the directory to `state`, or send logs to stdout or `/var/log` and temporary files to `/tmp` |
 | `probes` | `'name': earned 1.00, above max_reward 0` | the checks don't catch that wrong solution | add a gate or tighten a check; keep the probe |
 | `probes` | `'name': earned 0.00, below min_reward 1` | the checks reject a right solution | loosen the check that scored below 1 |
@@ -81,6 +83,7 @@ jq -c '.tasks[] | .id as $id | .probes.runs[]? | {task: $id, name, reward, statu
 | `drift` | `with timestamps a day behind dates ... earned 0, not 1` | a check mixes dates and timestamps, so it depends on the time of day of the reset | compare timestamps with timestamps (`now()`) and dates with dates (`CURRENT_DATE`) |
 
 `repeat` and `reset` compare the golden run with two repeats, and `reset` ignores time columns.
+`reset` also compares each task's resets with the first reset checked of its world and `setup`.
 `drift` replays the golden run with timestamps moved a day less than dates, as when a reset runs
 earlier in the day than the bake did.
 

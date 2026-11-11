@@ -34,8 +34,8 @@ CMD ["run"]
 - Initialize each datastore's data directory, owned by the user it runs as. For MySQL:
   `mysqld --initialize-insecure --user=mysql --datadir=...`, with an `--init-file` that creates
   the users.
-- `miroir bake` reads `/miroir/miroir.yaml`, validates the tasks, seeds the data and keeps the
-  state.
+- `miroir bake` reads `/miroir/miroir.yaml`, validates the tasks in the image, seeds the data,
+  validates every task again (a seed may write tasks) and keeps the state.
 - The entrypoint is `miroir` under `tini` (or `dumb-init`, `catatonit`, `docker run --init`): a
   reset kills every process but Miroir and PID 1.
 - `MIROIR_ENV_VERSION`, such as the product image's tag, is what `/metadata` reports.

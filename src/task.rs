@@ -397,6 +397,11 @@ impl Manifest {
     }
 }
 
+/// Whether a directory holds task files.
+pub fn has_task_files(dir: &Path) -> Result<bool, ManifestError> {
+    Ok(!yaml_files(dir)?.is_empty())
+}
+
 fn yaml_files(dir: &Path) -> Result<Vec<PathBuf>, ManifestError> {
     let entries = std::fs::read_dir(dir).map_err(|e| error(dir, e.to_string()))?;
     let mut paths = Vec::new();
@@ -1144,6 +1149,19 @@ probes:
         std::fs::write(dir.join("c.yaml"), format!("id: a-task\n{TASK}")).unwrap();
         let err = m.load_tasks(&dir).unwrap_err().to_string();
         assert!(err.contains("used twice"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_folder_holds_task_files_once_a_yaml_file_is_in_it() {
+        let dir = std::env::temp_dir().join(format!("miroir-has-tasks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(has_task_files(&dir).is_err(), "a missing folder is an error");
+        std::fs::create_dir_all(dir.join("probes")).unwrap();
+        std::fs::write(dir.join("notes.txt"), "ignored").unwrap();
+        assert!(!has_task_files(&dir).unwrap(), "a seed may write the tasks during bake");
+        std::fs::write(dir.join("t.yml"), TASK).unwrap();
+        assert!(has_task_files(&dir).unwrap());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -40,7 +40,7 @@ A failed stage prints its reasons under the task, and the command exits non-zero
 | `golden` | the golden run succeeds, and every call works: HTTP below 400, code exits 0, no tool error |
 | `null` | an immediate empty `submit` earns at most `null_max` (0 by default), and every gate holds |
 | `repeat` | two more golden runs earn the same reward and the same check scores |
-| `reset` | the data after reset and `setup` hashes the same in all of these runs, time columns aside |
+| `reset` | the data after reset and `setup` hashes the same in all of these runs, and as in the first run checked of the same world and `setup`, time columns aside |
 | `writes` | no file changed outside the state directories |
 | `probes` | each probe's reward stays within its bounds |
 | `hedge` | submitting the golden answer among wrong guesses earns at most `null_max` |

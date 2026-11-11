@@ -46,7 +46,8 @@ code. The Miroir repository's
 and `acme-apps` (several apps). Its
 [`examples/gitea`](https://github.com/raphaelDkhn/miroir/tree/master/examples/gitea) makes a
 stock product image an env: Gitea with Postgres, Unix-time columns, mail and webhooks in the
-sinks, a coworker and a clock.
+sinks, coworkers and clocks, three worlds, and a seed that writes the tasks from the ids its
+rows got.
 
 ## Make an env
 

@@ -113,6 +113,17 @@ which is where [`miroir review`](../train/review.md) adds them.
 `split` is `train` (the default), `validation` or `test`. Clients pick a split when they list
 or draw tasks.
 
+## Generate tasks in the seed
+
+Checks name rows by the ids the database gave them, which exist only once the seed has run. A
+`seed` command can write the task files itself, to `/miroir/tasks`, from the ids it reads back:
+bake validates them after the seed, and fails the build if one doesn't. A generator that plants
+the same kinds of work many times, with different rows and answers, gives many tasks per kind,
+which training needs. Keep the generator deterministic, so every bake writes the same tasks.
+
+[`examples/gitea`](https://github.com/raphaelDkhn/miroir/tree/master/examples/gitea) writes 144
+tasks this way: twelve kinds of work, four times in each of three worlds.
+
 ## Other fields
 
 `persona`, `world`, `max_steps` (50 by default), `setup` (SQL run at reset), `harm_reward`,

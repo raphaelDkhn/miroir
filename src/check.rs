@@ -17,20 +17,33 @@ use crate::task::{Answer, GoldenStep, Probe, Task, move_date};
 
 const IDLE: Duration = Duration::from_secs(30);
 
+/// A fingerprint of the data after a reset: each table's hash, time columns aside.
+type Print = BTreeMap<String, String>;
+
+/// The first fingerprint of each world and `setup`, with the task it was taken for.
+type Firsts = BTreeMap<(String, Option<String>), (String, Print)>;
+
+/// What `check` gathers across tasks: reset and grading times, and the first fingerprints.
+#[derive(Default)]
+struct Gathered {
+    resets: Vec<Duration>,
+    grading: Vec<Duration>,
+    firsts: Firsts,
+}
+
 /// Check the env and its tasks, or only `world`'s, and return the JSON report.
 pub async fn run(env: &Arc<Env>, mutate: bool, world: Option<&str>) -> Value {
     let shift = env.shift();
-    let mut resets = Vec::new();
+    let mut gathered = Gathered::default();
     let users = users(env);
     let checked: Vec<&Task> =
         env.tasks.iter().filter(|task| world.is_none_or(|world| task.world == world)).collect();
-    let idle = idle_worlds(env, &checked, shift, &mut resets).await;
+    let idle = idle_worlds(env, &checked, shift, &mut gathered.resets).await;
     let mcp = mcp_tools(env).await;
     let sandbox = sandbox(env).await;
     let mut tasks = Vec::new();
-    let mut grading = Vec::new();
     for task in checked {
-        let mut report = check_task(env, task, shift, &mut resets, &mut grading).await;
+        let mut report = check_task(env, task, shift, &mut gathered).await;
         if mutate {
             report["mutations"] = mutations(env, task, shift).await;
         }
@@ -55,10 +68,10 @@ pub async fn run(env: &Arc<Env>, mutate: bool, world: Option<&str>) -> Value {
         "stages": stages,
         "tasks": tasks,
         "timings": {
-            "reset_p50_s": percentile(&resets, 50),
-            "reset_p95_s": percentile(&resets, 95),
-            "grading_p50_s": percentile(&grading, 50),
-            "grading_max_s": percentile(&grading, 100),
+            "reset_p50_s": percentile(&gathered.resets, 50),
+            "reset_p95_s": percentile(&gathered.resets, 95),
+            "grading_p50_s": percentile(&gathered.grading, 50),
+            "grading_max_s": percentile(&gathered.grading, 100),
         },
     })
 }
@@ -135,13 +148,7 @@ async fn idle(env: &Env, task: &Task, shift: Shift, resets: &mut Vec<Duration>) 
     }
 }
 
-async fn check_task(
-    env: &Arc<Env>,
-    task: &Task,
-    shift: Shift,
-    resets: &mut Vec<Duration>,
-    grading: &mut Vec<Duration>,
-) -> Value {
+async fn check_task(env: &Arc<Env>, task: &Task, shift: Shift, gathered: &mut Gathered) -> Value {
     let before = scan(&env.state).await;
     let mut prints = Vec::new();
     let golden_run = Replay { label: "golden", steps: &task.golden, fingerprint: true };
@@ -156,8 +163,8 @@ async fn check_task(
     for run in std::iter::once(&golden).chain([&empty]).chain(&repeats) {
         match run {
             Ok(run) => {
-                resets.push(run.reset);
-                grading.push(run.grading);
+                gathered.resets.push(run.reset);
+                gathered.grading.push(run.grading);
                 prints.push(run.print.clone());
             }
             Err(e) => failures.push(e.clone()),
@@ -201,14 +208,8 @@ async fn check_task(
             && !spoiled(&r.metadata)
     });
     report["repeat"] = json!({"passed": repeat_ok, "runs": repeated});
-    let differing: BTreeSet<&String> = prints
-        .iter()
-        .flat_map(|p| p.iter())
-        .filter(|(table, print)| prints[0].get(*table) != Some(*print))
-        .map(|(table, _)| table)
-        .collect();
-    let reset_ok = differing.is_empty() && prints.iter().all(|p| p.len() == prints[0].len());
-    report["reset"] = json!({"passed": reset_ok, "differing_tables": differing});
+    report["reset"] = reset_stage(task, &prints, &mut gathered.firsts);
+    let reset_ok = report["reset"]["passed"] == true;
     let mut probes_ok = true;
     if !task.probes.is_empty() {
         let runs = probes(env, task, shift).await;
@@ -229,6 +230,38 @@ async fn check_task(
         && report["drift"]["passed"] == true;
     report["passed"] = json!(golden_ok && null_ok && repeat_ok && others_ok);
     report
+}
+
+/// The reset stage: every fingerprint of a task's runs hashes the same as its first, and as the
+/// first of its world with the same `setup`, whichever task that was for: an episode that left
+/// something a reset did not restore shows up in the tasks checked after it.
+fn reset_stage(task: &Task, prints: &[Print], firsts: &mut Firsts) -> Value {
+    let Some(own) = prints.first() else {
+        return json!({"passed": false, "differing_tables": [], "differing_from_first": []});
+    };
+    let differing = tables_unlike(own, prints);
+    let key = (task.world.clone(), task.setup.clone());
+    let (first, print) = firsts.entry(key).or_insert_with(|| (task.id.clone(), own.clone()));
+    let unlike = tables_unlike(print, prints);
+    json!({
+        "passed": differing.is_empty() && unlike.is_empty(),
+        "differing_tables": differing,
+        "first_reset": first,
+        "differing_from_first": unlike,
+    })
+}
+
+/// The tables whose hash differs between `reference` and any of `prints`, or that one lacks.
+fn tables_unlike(reference: &Print, prints: &[Print]) -> Vec<String> {
+    let mut tables = BTreeSet::new();
+    for print in prints {
+        for table in reference.keys().chain(print.keys()) {
+            if reference.get(table) != print.get(table) {
+                tables.insert(table.clone());
+            }
+        }
+    }
+    tables.into_iter().collect()
 }
 
 async fn drift(
@@ -370,7 +403,7 @@ struct Run {
     checks: Value,
     metadata: Value,
     statuses: Vec<Value>,
-    print: BTreeMap<String, String>,
+    print: Print,
     reset: Duration,
     grading: Duration,
 }
@@ -828,11 +861,25 @@ fn repeat_reasons(task: &Value) -> Vec<String> {
 }
 
 fn reset_reasons(task: &Value) -> Vec<String> {
-    let tables: Vec<&str> =
-        list(&task["reset"]["differing_tables"]).iter().filter_map(Value::as_str).collect();
-    let tables =
-        if tables.is_empty() { String::new() } else { format!(" in {}", tables.join(", ")) };
-    vec![format!("the fingerprint after setup changed between resets{tables}")]
+    let reset = &task["reset"];
+    let tables = |key: &str| -> String {
+        let names: Vec<&str> = list(&reset[key]).iter().filter_map(Value::as_str).collect();
+        names.join(", ")
+    };
+    let mut lines = Vec::new();
+    let (within, unlike) = (tables("differing_tables"), tables("differing_from_first"));
+    if !within.is_empty() {
+        lines.push(format!("the fingerprint after setup changed between resets in {within}"));
+    }
+    let first = reset["first_reset"].as_str().unwrap_or_default();
+    if !unlike.is_empty() && first != task["id"].as_str().unwrap_or_default() {
+        lines.push(format!(
+            "the fingerprint after setup differs in {unlike} from the first reset of this world \
+             and setup, for task '{first}': a run checked in between left data a reset did not \
+             restore"
+        ));
+    }
+    lines
 }
 
 fn writes_reasons(task: &Value) -> Vec<String> {
@@ -1158,6 +1205,59 @@ PASSED"
         assert_eq!(as_sent(&dated.golden[0], &dated, shift), dated.golden[0].arguments);
         let ids = task("ids");
         assert_eq!(as_sent(&ids.golden[1], &ids, shift)["answer"], " 2026-03-31 ");
+    }
+
+    #[test]
+    fn every_reset_of_a_world_and_setup_hashes_the_same_whichever_task_it_was_for() {
+        let task = |id: &str, world: &str, setup: Option<&str>| -> Task {
+            let setup = setup.map(|sql| format!("setup: {sql}\n")).unwrap_or_default();
+            let yaml = format!(
+                "id: {id}\nworld: {world}\n{setup}instruction: Do it.\nchecks: []\n\
+                 any_change: true\ngolden: [{{tool: submit}}]\n"
+            );
+            serde_saphyr::from_str(&yaml).unwrap()
+        };
+        let print = |deals: &str| -> Print {
+            [("deals", deals), ("notes", "2:ab")].map(|(t, h)| (t.into(), h.into())).into()
+        };
+        let mut firsts = BTreeMap::new();
+        let clean = [print("3:aa"), print("3:aa")];
+        let first = reset_stage(&task("a", "north", None), &clean, &mut firsts);
+        assert_eq!(first["passed"], true, "{first}");
+        let left =
+            reset_stage(&task("b", "north", None), &[print("4:bb"), print("4:bb")], &mut firsts);
+        assert_eq!(left["passed"], false, "the same within the task, unlike the world's first");
+        assert_eq!(
+            (&left["differing_tables"], &left["differing_from_first"]),
+            (&json!([]), &json!(["deals"]))
+        );
+        let reasons = reset_reasons(&json!({"id": "b", "reset": left}));
+        assert!(
+            reasons[0].contains("differs in deals from the first reset")
+                && reasons[0].contains("'a'"),
+            "{reasons:?}"
+        );
+        let other = [print("4:bb"), print("4:bb")];
+        let south = reset_stage(&task("c", "south", None), &other, &mut firsts);
+        let setup =
+            reset_stage(&task("d", "north", Some("DELETE FROM deals")), &other, &mut firsts);
+        assert_eq!(
+            (&south["passed"], &setup["passed"]),
+            (&json!(true), &json!(true)),
+            "first of their own"
+        );
+        let mut gone = print("3:aa");
+        gone.remove("notes");
+        let missing = reset_stage(&task("e", "north", None), &[print("3:aa"), gone], &mut firsts);
+        assert_eq!(missing["differing_tables"], json!(["notes"]), "a table one run lacks is named");
+        let reasons = reset_reasons(&json!({"id": "e", "reset": missing}));
+        assert_eq!(
+            reasons,
+            [
+                "the fingerprint after setup changed between resets in notes",
+                "the fingerprint after setup differs in notes from the first reset of this world and setup, for task 'a': a run checked in between left data a reset did not restore"
+            ]
+        );
     }
 
     #[test]

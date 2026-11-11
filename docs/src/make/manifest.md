@@ -97,7 +97,8 @@ exits 0 when the product is idle; Miroir waits until it passes twice in a row, f
 
 ## What bake does
 
-For each world:
+Bake validates the tasks already in `/miroir/tasks`, so a broken task file fails the build before
+the seeding. Then, for each world:
 
 1. Start the datastores and wait until each database answers.
 2. Run the `bake` commands.
@@ -105,6 +106,9 @@ For each world:
 4. Run the `seed` commands and wait for quiet.
 5. Install the triggers that log row changes.
 6. Stop everything and move the state to `/miroir/pristine/<world>`.
+
+Last, it validates every task again, including those a seed wrote: see
+[Generate tasks in the seed](tasks.md#generate-tasks-in-the-seed).
 
 ## What a reset does
 
