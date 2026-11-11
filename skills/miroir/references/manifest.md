@@ -165,6 +165,7 @@ at least one has a `database`.
 | `description` | what the app is; required when several apps have an `api` |
 | `api.base_url` | the API's `http://` URL on loopback, where the agent's requests go |
 | `api.openapi` | the absolute path of its OpenAPI spec, JSON or YAML, which `api_docs` serves |
+| `api.omit` | keys dropped from the API's JSON answers at any depth: `key`, `parent.key` for one under `parent`, `*` for any run of characters, `{a,b}` for either |
 | `mcp.url` | the `http://` URL on loopback of the app's MCP server; one app at most |
 | `database.url` | a `postgres://`, `postgresql://` or `mysql://` URL that names a database |
 | `database.schemas` | the schemas to read; all of them when unset |
@@ -174,6 +175,12 @@ at least one has a `database`.
 
 The database user must be able to create triggers. A key column can't be ignored, and an
 `epoch` pattern must match a 32- or 64-bit integer column.
+
+Every answer stays in the agent's context for the rest of the episode, and in each training
+sample, so give `api.omit` what the agent can't use and every object repeats: links to web
+pages, avatars, embedded copies of whole parent objects, account settings of embedded users.
+Check each key against the spec first: a name that also means something elsewhere (`active`,
+`description`, `url`) needs its parent, as in `{user,assignee}.description`.
 
 ### `personas.<name>`
 
