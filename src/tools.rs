@@ -543,8 +543,10 @@ fn fit(body: Value) -> (Value, Option<Value>) {
             size <= BODY_LIMIT
         })
         .collect();
+    let left = total - kept.len();
     let note = format!(
-        "only the first {} of these {total} items fit; ask for fewer at a time to see the others",
+        "only the first {} of these {total} items fit: the last {left} are left out, and the next \
+         page starts after them; ask for fewer at a time to see them",
         kept.len()
     );
     (Value::Array(kept), Some(Value::String(note)))
