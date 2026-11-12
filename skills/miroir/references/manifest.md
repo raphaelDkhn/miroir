@@ -145,7 +145,10 @@ commands or processes sees `MIROIR_TOKEN`.
 | `ready` | none | `tcp: PORT` (a loopback port that accepts connections) or `http: URL` (answers 2xx or 3xx), and `timeout_s` (60 by default, up to 86,400) |
 
 Datastores come before every other process, and there is at least one. Miroir waits for each
-`ready` probe before it starts the next process.
+`ready` probe before it starts the next process. A datastore needs no durability, since each
+reset restores its files: run Postgres with
+`-c fsync=off -c synchronous_commit=off -c full_page_writes=off` to skip the fsyncs of each
+commit and checkpoint.
 
 ### `state`
 

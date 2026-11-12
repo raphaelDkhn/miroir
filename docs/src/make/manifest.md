@@ -49,7 +49,9 @@ quiet:
 Miroir starts the processes in order and waits for each `ready` probe before the next: a
 loopback TCP port, or an `http://` URL that answers 2xx or 3xx. Mark the datastores with
 `datastore: true` and list them first. During a reset they run alone while the data is
-restored and its dates are moved.
+restored and its dates are moved. A datastore needs no durability, since each reset restores
+its files: run Postgres with `-c fsync=off -c synchronous_commit=off -c full_page_writes=off`
+to skip the fsyncs of each commit and checkpoint.
 
 ## Bake and seed
 

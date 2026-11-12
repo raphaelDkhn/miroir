@@ -12,11 +12,11 @@ use std::time::Duration;
 use rustix::process::{Pid, Signal};
 use tokio::process::Command;
 use tokio::sync::watch;
-use tokio::time::{Instant, sleep, timeout};
+use tokio::time::{Instant, sleep, sleep_until, timeout};
 
 use crate::manifest::{Process, Quiet, Ready};
 
-const PROBE_INTERVAL: Duration = Duration::from_millis(100);
+const PROBE_INTERVAL: Duration = Duration::from_millis(20);
 const QUIET_INTERVAL: Duration = Duration::from_millis(200);
 const CONTAINER_INITS: [&str; 10] = [
     "miroir",
@@ -222,7 +222,8 @@ impl Supervisor {
         }
     }
 
-    /// Wait until the quiet command passes twice in a row; without one, a second.
+    /// Wait until the quiet command passes twice in a row, its runs starting at least 200 ms
+    /// apart; without one, a second.
     pub async fn wait_quiet(&self, quiet: Option<&Quiet>) -> Result<(), SupervisorError> {
         let Some(quiet) = quiet else {
             sleep(Duration::from_secs(1)).await;
@@ -231,6 +232,7 @@ impl Supervisor {
         let deadline = Instant::now() + Duration::from_secs(quiet.timeout_s);
         let mut passes = 0;
         loop {
+            let started = Instant::now();
             let mut command = self.command(&quiet.command);
             command.stdout(Stdio::null()).stderr(Stdio::null());
             let limit = deadline.saturating_duration_since(Instant::now()).max(QUIET_INTERVAL);
@@ -246,7 +248,7 @@ impl Supervisor {
             if Instant::now() >= deadline {
                 return Err(SupervisorError(format!("not quiet after {} s", quiet.timeout_s)));
             }
-            sleep(QUIET_INTERVAL).await;
+            sleep_until(started + QUIET_INTERVAL).await;
         }
     }
 
@@ -449,5 +451,15 @@ mod tests {
         let started = std::time::Instant::now();
         supervisor.wait_quiet(Some(&quiet)).await.unwrap();
         assert!(started.elapsed() >= QUIET_INTERVAL, "two passes, 200 ms apart");
+    }
+
+    #[tokio::test]
+    async fn a_slow_quiet_command_runs_its_passes_back_to_back() {
+        let supervisor = Supervisor::new(BTreeMap::new()).unwrap();
+        let quiet = Quiet { command: vec!["sleep".into(), "0.4".into()], timeout_s: 5 };
+        let started = std::time::Instant::now();
+        supervisor.wait_quiet(Some(&quiet)).await.unwrap();
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_millis(950), "no pause after a 400 ms pass: {elapsed:?}");
     }
 }

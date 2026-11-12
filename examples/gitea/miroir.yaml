@@ -6,9 +6,11 @@ description: >-
   company held out for test
 processes:
   # TCP only, with no socket in /run, which a VM such as a Prime sandbox mounts empty at boot.
+  # No durability: every reset restores the state, and a clean stop still writes every page.
   - name: db
     command: [postgres, -D, /var/lib/postgresql/data, -c, listen_addresses=127.0.0.1,
-              -c, unix_socket_directories=]
+              -c, unix_socket_directories=, -c, fsync=off, -c, synchronous_commit=off,
+              -c, full_page_writes=off]
     user: postgres
     datastore: true
     ready: {tcp: 5432}
