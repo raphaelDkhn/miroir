@@ -17,7 +17,6 @@ const MAP_BATCH_BYTES: usize = 8 * 1024 * 1024;
 const NEVER_FROM: &str = "9000-01-01";
 const NEVER_FROM_UNIX: i64 = 221_845_392_000;
 
-/// A database operation that failed.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct DbError(pub String);
@@ -28,14 +27,12 @@ impl From<sqlx::Error> for DbError {
     }
 }
 
-/// The database's SQL dialect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dialect {
     Postgres,
     MySql,
 }
 
-/// A table and its columns.
 #[derive(Debug, Clone)]
 pub struct Table {
     /// Name as checks see it, schema-qualified outside the default schema.
@@ -231,7 +228,6 @@ impl Db {
         Ok(url.to_string())
     }
 
-    /// Read the tables and their columns.
     pub async fn tables(&self) -> Result<Vec<Table>, DbError> {
         match self.dialect {
             Dialect::Postgres => postgres::tables(&self.url, self.schemas.as_deref()).await,

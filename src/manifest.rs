@@ -19,7 +19,6 @@ pub struct ManifestError {
     pub message: String,
 }
 
-/// The env manifest.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -754,7 +753,6 @@ fn is_slug(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-/// `Err(message)` unless `condition` holds.
 pub(crate) fn ensure(condition: bool, message: impl Into<String>) -> Result<(), String> {
     if condition { Ok(()) } else { Err(message.into()) }
 }

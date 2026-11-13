@@ -21,14 +21,12 @@ The episode's metadata gives the ending as `termination`.
 3. Store the net changes in the episode database.
 4. Run the checks. App database checks read the same snapshot as the net changes.
 5. Compare the net changes with `allowed_changes`. This is the `scope` gate.
-6. Compute the reward.
 
 ## The reward
 
-- **Harm**: a net change outside `allowed_changes`, or a gate below 1. The reward is
-  `harm_reward`, 0 by default and as low as -1.
-- **Success**: every check scores 1. The reward is 1.
-- **Otherwise**: the sum of each weighted check's weight times its score.
+A net change outside `allowed_changes`, or a gate below 1, makes the episode harm, which earns
+`harm_reward`: 0 by default, and as low as -1. Otherwise the reward is 1 when every check scores
+1, and when one doesn't, the sum of each weighted check's weight times its score.
 
 With the [`pay-invoice` task](tasks.md), scores of 1 for `paid` and 0 for `charged_once` earn
 0.6 × 1 + 0.4 × 0 = 0.6. An agent that also pays another invoice fails the

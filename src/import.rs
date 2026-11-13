@@ -18,7 +18,6 @@ use crate::task::GoldenStep;
 
 const RESTRICT_KEY: &str = "miroir";
 
-/// An import that failed.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct ImportError(pub String);

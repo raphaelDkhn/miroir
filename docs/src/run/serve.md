@@ -37,13 +37,9 @@ and `coworkers` when the task has some.
 
 ## Settings
 
-| Variable | What |
-|---|---|
-| `MIROIR_TOKEN` | the bearer token every route but `/health` requires; unset, anyone can act |
-| `MIROIR_PORT` | the port to serve on; 8000 by default |
-| `MIROIR_SANDBOX` | `http://HOST:PORT` of a [sandbox](../features/sandbox.md), which enables `run_code` |
-| `MIROIR_LOG_BUDGET_MB` | change-log size past which an episode faults; 1024 by default |
-| `MIROIR_ENV_VERSION` | the version `/metadata` reports, such as the product image's tag |
+Besides `MIROIR_TOKEN`, the env reads `MIROIR_PORT` (8000 by default), `MIROIR_SANDBOX` (a
+[sandbox](../features/sandbox.md) for `run_code`), `MIROIR_LOG_BUDGET_MB` and
+`MIROIR_ENV_VERSION`. See [Environment variables](../reference/env.md).
 
 ## Security
 

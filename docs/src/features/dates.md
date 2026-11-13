@@ -6,11 +6,8 @@ before bake is due a week before today.
 
 ## What moves
 
-The shift has two parts:
-
-- **Timestamps** move by the whole days since the anchor, rounded down, so their time of day
-  stays.
-- **Dates** move by the calendar days (UTC) since the anchor's date.
+Timestamps move by the whole days since the anchor, rounded down, so their time of day stays.
+Dates move by the calendar days (UTC) since the anchor's date.
 
 Miroir moves every date and timestamp column of every app database, and leaves alone:
 

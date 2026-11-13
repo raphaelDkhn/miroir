@@ -1,67 +1,52 @@
 # Concepts
 
-Env
-: A product's Docker image with Miroir, a [manifest](make/manifest.md) and
-  [tasks](make/tasks.md) added. One container runs one episode at a time.
+**Env**  
+A product's Docker image extended with Miroir, a [manifest](make/manifest.md), and [tasks](make/tasks.md). One container runs one episode at a time.
 
-App
-: A part of the product that the agent or the grader reaches: an HTTP API, an MCP server, a
-  Postgres or MySQL database, or several of these.
+**App**  
+A product interface accessible to the agent or grader: an HTTP API, MCP server, database, or combination.
 
-Persona
-: The user the agent acts as. Its headers, such as a bearer token, are pinned on every request
-  the agent sends.
+**Persona**  
+The identity the agent acts as. Its credentials and headers are automatically attached to every request.
 
-World
-: A seed snapshot of the product's data. Most envs have one, named `default`.
+**World**  
+A seeded snapshot of product data. Most envs have one, named `default`.
 
-Bake
-: Seeding the data once, at image build, and keeping the state as the pristine copy of each
-  world.
+**Bake**  
+Seeds each world at image build time and saves its pristine state for future resets.
 
-Reset
-: Restoring a world before an episode: kill every process, copy the state back, move the dates,
-  start the product, wait until it is quiet.
+**Reset**  
+Restores a world to its pristine state, restarts the product, advances dates, and waits until it is ready.
 
-Task
-: An instruction for the agent, the checks that grade it, the changes it may make, and a golden
-  run.
+**Task**  
+An agent instruction, grading checks, allowed changes, and a golden run.
 
-Episode
-: One attempt at a task, from reset to its end: a submit, the step limit, the time limit or a
-  crash.
+**Episode**  
+One attempt at a task, from reset until submission, step or time limit, or crash.
 
-Net change
-: How a row differs between the reset and the end of the episode: inserted, updated (with the
-  columns that changed) or deleted. A row changed and changed back has no net change.
+**Net change**  
+A row-level difference between the initial and final state: inserted, updated (including changed columns), or deleted. Changes reverted before the end are ignored.
 
-Effect
-: An email or HTTP call the product sent, which a [sink](features/sinks.md) caught.
+**Effect**  
+An outgoing email or HTTP request captured by a [sink](features/sinks.md).
 
-Check
-: A SQL query or a command scored from 0 to 1. A weighted check adds to the reward; a gate must
-  score 1.
+**Check**  
+A SQL query or command that scores an episode from 0 to 1. Weighted checks contribute to reward; gates must score 1.
 
-Harm
-: A net change the task does not allow, a failed gate, or an episode that broke the env. Harm
-  earns `harm_reward`, 0 by default.
+**Harm**  
+An unauthorized state change, failed gate, or broken environment. Harm overrides the normal reward with `harm_reward` (0 by default).
 
-Golden run
-: A list of tool calls that solves the task. [`miroir check`](make/check.md) replays it and
-  requires a reward of 1.
+**Golden run**  
+A sequence of tool calls that solves a task. [`miroir check`](make/check.md) replays it and requires a reward of 1.
 
-Probe
-: A list of tool calls whose reward must stay within bounds, such as a wrong solution that must
-  earn 0.
+**Probe**  
+A sequence of tool calls with an expected reward range, used to verify that incorrect behavior is graded correctly.
 
-Episode database
-: A SQLite file with the episode's tool calls, effects, net changes and answer, which checks
-  can query. See the [reference](reference/episode-db.md).
+**Episode database**  
+A SQLite database containing an episode's tool calls, effects, net changes, and answer. Checks can query it. See the [reference](reference/episode-db.md).
 
-Record
-: What a finished episode returns: its calls, net changes, effects, grade, timings and a
-  signature.
+**Record**  
+The output of a completed episode: tool calls, net changes, effects, grade, timings, and signature.
 
-Signature
-: A hash of the end state. Rollouts that end in the same state share it, which
-  [review](train/review.md) uses to group them.
+**Signature**  
+A hash of the final state. Episodes with identical final states share a signature, allowing [review](train/review.md) to group them.

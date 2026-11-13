@@ -31,7 +31,6 @@ const HOOK_LIMIT: Duration = Duration::from_secs(300);
 pub const BAKE_LIMIT: Duration = Duration::from_secs(3600);
 const SCAN_EVERY: u64 = 10;
 
-/// Why an env operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum EnvError {
     #[error(transparent)]
@@ -101,7 +100,6 @@ pub struct BakeInfo {
     pub state: Vec<PathBuf>,
 }
 
-/// Load the manifest and its tasks.
 pub fn load(paths: &Paths) -> Result<(Manifest, Vec<Task>), ManifestError> {
     let manifest = Manifest::load(&paths.manifest())?;
     let tasks = manifest.load_tasks(&paths.tasks())?;

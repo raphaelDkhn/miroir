@@ -26,9 +26,6 @@ def pyproject(project: dict, pushed: time.struct_time) -> str:
     Args:
         project: The `[project]` table of python/pyproject.toml.
         pushed: When the push happens, in UTC: the version's post-release.
-
-    Returns:
-        The staged package's pyproject.toml text.
     """
     dependencies = [*project["dependencies"], *project["optional-dependencies"]["verifiers"]]
     listed = ", ".join(f'"{dependency}"' for dependency in dependencies)

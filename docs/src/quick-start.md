@@ -60,9 +60,3 @@ session.close()
 
 The reward is 1: the invoice is paid, the payment provider was called once, and nothing else
 changed.
-
-## Next
-
-- [Concepts](concepts.md) explains the words used in these docs.
-- [Add Miroir to the image](make/image.md) starts the guide to making an env for your product.
-- [TRL](train/trl.md) and [verifiers](train/verifiers.md) train and evaluate on an env.

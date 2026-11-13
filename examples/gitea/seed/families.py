@@ -63,9 +63,6 @@ def split(world: World, family: Family, index: int) -> str:
     return "train" if family.trained and index < INSTANCES - 1 else "validation"
 
 
-# Steps of golden runs and probes.
-
-
 def call(method: str, path: str, body: Any = None) -> Step:
     """An api_request step."""
     arguments: dict[str, Any] = {"method": method, "path": path}
@@ -75,20 +72,14 @@ def call(method: str, path: str, body: Any = None) -> Step:
 
 
 def submit(answer: str | None = None) -> Step:
-    """The submit step."""
     return {"tool": "submit", "arguments": {} if answer is None else {"answer": answer}}
 
 
 def wait(minutes: int) -> Step:
-    """A wait step."""
     return {"tool": "wait", "arguments": {"minutes": minutes}}
 
 
-# Checks, gates, probes and allowed changes.
-
-
 def check(name: str, weight: float, sql: str, *, db: str | None = None, by: int = 0) -> dict:
-    """A weighted check."""
     found: dict[str, Any] = {"name": name, "weight": weight}
     if db:
         found["db"] = db
@@ -140,9 +131,6 @@ def only_issues(ids: list[int], tables: tuple[str, ...] = ("comment",)) -> str:
         f"       AND json_extract(coalesce(after, before), '$.issue_id') NOT IN ({these})\n"
         f"       AND coalesce(json_extract(after, '$.ref_issue_id'), 0) NOT IN ({these}))"
     )
-
-
-# Planting helpers.
 
 
 def band_clear(world: World, repo: str, age: float) -> bool:
@@ -204,7 +192,6 @@ def free_writers(world: World, repo: str) -> list[str]:
 
 
 def kind_label(world: World, kind: str) -> str:
-    """The label of an issue kind."""
     scheme = world.scheme
     return {"bug": scheme.bug, "feature": scheme.feature, "chore": scheme.chore}[kind]
 

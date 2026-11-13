@@ -80,7 +80,6 @@ pub fn validate(manifest: &Manifest, task: &Task) -> Result<(), String> {
     )
 }
 
-/// Check the `wait` steps of a run.
 pub fn validate_waits(what: &str, steps: &[GoldenStep], clock: bool) -> Result<(), String> {
     for (i, step) in steps.iter().enumerate().filter(|(_, step)| step.tool == WAIT) {
         let at = format!("{what} step {}", i + 1);

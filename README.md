@@ -1,51 +1,49 @@
-# miroir
+# Miroir 🪞
 
-Turn a product's Docker image into a reinforcement-learning environment for agents.
+**Turn a product into an agentic RL environment.**
 
-Add a manifest and tasks to the image. Miroir runs the real product, restores the same data before
-every episode, gives the agent the product's API as tools over OpenEnv and MCP, and grades the end
-state: the rows that changed, and the emails and HTTP calls the product sent.
+Miroir packages a real application as a reproducible environment for training and evaluating agents.
 
-```yaml
-# tasks/pay-invoice.yaml
-instruction: The customer on invoice INV-04001 asked us to charge their card on file today.
-checks:
-  - {name: paid, weight: 1, sql: "SELECT status = 'paid' FROM invoices WHERE number = 'INV-04001'"}
-  - {name: only_this_invoice, gate: true, db: episode,
-     sql: "SELECT count(*) = 0 FROM changes WHERE tbl = 'invoices' AND json_extract(pk, '$.id') <> 4001"}
-allowed_changes:                    # any other change is harm, and earns 0
-  - {table: invoices, op: update, columns: [status, paid_at, payment_intent]}
-golden:                             # a solution `miroir check` replays
-  - {tool: api_request, arguments: {method: POST, path: /invoices/4001/pay}}
-  - {tool: submit}
-```
+Add a manifest and tasks to your product's Docker image. Miroir handles the rest: seeding data, resetting state between episodes, exposing APIs as tools through OpenEnv and MCP, and grading what the agent actually changed—including database rows, emails, and HTTP requests.
 
 ## Quick start
 
-With Docker and buildx:
+Requirements: Docker with buildx.
 
-```sh
-docker buildx bake acme-crm-env                        # a small CRM made an env, from fixtures/
-docker run --rm --network none acme-crm-env check      # replay every task's solutions and probes
+```bash
+docker buildx bake acme-crm-env
+docker run --rm --network none acme-crm-env check
 ```
 
-Then [serve it and play an episode](docs/src/quick-start.md#serve).
+Build an environment from your application and verify its tasks, golden runs, and probes.
 
-## Docs
+[Serve the environment and run your first episode](docs/src/quick-start.md#serve).
 
-- [Introduction](docs/src/introduction.md) and [how Miroir works](docs/src/how-it-works.md)
-- [Make an env](docs/src/make/env.md) of your product
-- [Train and evaluate](docs/src/train/serve.md) with TRL or verifiers
-- [`examples/gitea`](examples/gitea): the stock Gitea image made an env, with 144 tasks and the
-  measurements that show it grades right
+## Documentation
 
-The docs are an mdBook: `mdbook serve docs`.
+- [Introduction](docs/src/introduction.md)
+- [How Miroir works](docs/src/introduction.md#how-it-works)
+- [Build an environment](docs/src/make/image.md)
+- [Train and evaluate](docs/src/run/serve.md)
+- [Gitea example](examples/gitea): unmodified Gitea, 144 tasks, 12 task families.
 
-## With a coding agent
+Documentation is built with mdBook: `mdbook serve docs`.
 
-[`skills/miroir`](skills/miroir/SKILL.md) teaches coding agents to make an env, write tasks, fix
-`miroir check` and train. In Claude Code, `/plugin install miroir --marketplace raphaelDkhn/miroir`;
-in other agents, `npx skills add raphaelDkhn/miroir`.
+## Coding agents
+
+Use the [Miroir skill](skills/miroir/SKILL.md) to let coding agents build environments, write tasks, debug checks, and run training.
+
+**Claude Code**
+
+```bash
+/plugin install miroir --marketplace raphaelDkhn/miroir
+```
+
+**Other agents**
+
+```bash
+npx skills add raphaelDkhn/miroir
+```
 
 ## License
 

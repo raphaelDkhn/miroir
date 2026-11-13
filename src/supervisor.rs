@@ -31,7 +31,6 @@ const CONTAINER_INITS: [&str; 10] = [
     "ash",
 ];
 
-/// A supervision step that failed.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct SupervisorError(pub String);

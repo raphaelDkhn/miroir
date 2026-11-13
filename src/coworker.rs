@@ -96,7 +96,6 @@ fn validate_reply(manifest: &Manifest, at: &str, reply: &Map<String, Value>) -> 
     ensure(fills_text, format!("{at}: {{text}}, the answer, appears nowhere in path or body"))
 }
 
-/// Check the `coworker_reply` steps of a run.
 pub fn validate_replies(
     what: &str,
     steps: &[GoldenStep],

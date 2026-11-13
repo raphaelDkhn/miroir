@@ -511,7 +511,6 @@ async fn read_app(
     }
 }
 
-/// The outcome of an episode a process crash ended.
 pub fn crashed(task: &Task, crash: &Crash) -> Outcome {
     let mut outcome = faulted(task, &crash.to_string());
     outcome.metadata["crashed"] = json!({"process": crash.process, "exit_code": crash.exit_code});

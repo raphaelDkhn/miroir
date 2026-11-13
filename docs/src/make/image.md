@@ -26,15 +26,9 @@ ENTRYPOINT ["tini", "--", "miroir"]
 CMD ["run"]
 ```
 
-Line by line:
-
-- `ghcr.io/raphaeldkhn/miroir` holds one static binary, `/miroir`. Tags are `X.Y.Z` and `X.Y`.
-- Install the product's datastores and an init such as `tini`.
-- Initialize each datastore's data directory, owned by the user it runs as.
-- `miroir bake` reads `/miroir/miroir.yaml`, seeds the data and keeps the state. See
-  [the manifest](manifest.md).
-- `miroir` is the entrypoint, under `tini`.
-
+`ghcr.io/raphaeldkhn/miroir` holds one static binary, `/miroir`, tagged `X.Y.Z` and `X.Y`.
+Initialize each datastore's data directory, owned by the user it runs as, before `miroir bake`
+seeds the data the [manifest](manifest.md) describes.
 [`fixtures/acme-crm/Dockerfile.miroir`](https://github.com/raphaelDkhn/miroir/blob/master/fixtures/acme-crm/Dockerfile.miroir)
 is a full example. Build it like any image:
 
@@ -53,17 +47,6 @@ Miroir itself is PID 1, it runs but warns: the orphans a reset leaves are never 
 Give every process a `user` in the manifest. A process that runs as root fails
 [`check`](check.md), since it could read the tasks' checks and golden runs. Non-root users also
 let Miroir find the state to restore on its own.
-
-## Files under `/miroir`
-
-| Path | What |
-|---|---|
-| `miroir.yaml` | the manifest |
-| `tasks/` | the task files, and probes in `tasks/probes/` |
-| `pristine/<world>/` | the state bake kept, one copy per world |
-| `bake.json` | when bake ran, the Miroir version and the state directories |
-| `shifted/<world>/` | copies with the dates already moved, written at run time |
-| `episode.db` | the [episode database](../reference/episode-db.md), written at run time |
 
 ## Report the product's version
 

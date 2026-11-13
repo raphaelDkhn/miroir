@@ -150,7 +150,6 @@ class Issue:
 
     @property
     def is_pull(self) -> bool:
-        """Whether this is a pull request."""
         return False
 
     @property
@@ -177,7 +176,6 @@ class Pull(Issue):
 
     @property
     def is_pull(self) -> bool:
-        """Whether this is a pull request."""
         return True
 
     @property
@@ -989,7 +987,6 @@ def world(
 
 
 def codeowners(repo: Repo) -> str:
-    """The repository's CODEOWNERS file."""
     lines = ["# The owners of a path triage its issues and review its pull requests."]
     width = max(len(pattern) for pattern, _ in repo.owners) + 2
     lines += [f"{pattern:<{width}}@{login}" for pattern, login in repo.owners]
@@ -1176,7 +1173,6 @@ REMARKS = [
 
 
 def title(repo: Repo, noun: Noun, template: str) -> str:
-    """A title from a template and a noun."""
     return template.format(
         one=noun.one,
         many=noun.many,

@@ -136,4 +136,3 @@ tasks this way: twelve kinds of work, four times in each of three worlds.
 - Gate the changes that must not happen, such as another customer charged.
 - Compare a whole answer. A check that looks for the right answer inside a longer one rewards
   listing guesses; `check` tests for that.
-- Run [`miroir check`](check.md) after every change.
