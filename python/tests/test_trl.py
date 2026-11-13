@@ -436,6 +436,7 @@ def test_grpo_plays_a_scripted_golden_run_through_trls_tool_loop(urls, tmp_path,
             logging_steps=1,
             report_to="none",
             dataloader_pin_memory=False,
+            use_cpu=True,
         ),
     )
     replies = [

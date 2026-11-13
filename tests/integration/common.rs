@@ -67,6 +67,7 @@ pub fn bake(args: &[&str]) -> String {
 pub fn bake_outcome(args: &[&str]) -> (bool, String) {
     let out = Command::new("docker")
         .args(["buildx", "bake", "--progress=plain"])
+        .arg(format!("--allow=fs.read={}", std::env::temp_dir().display()))
         .args(args)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
