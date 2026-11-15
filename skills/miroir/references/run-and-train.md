@@ -130,7 +130,7 @@ the file.
 ## TRL
 
 ```sh
-uv pip install './python[trl]'
+uv pip install 'miroir[trl]'
 ```
 
 ```python
@@ -162,7 +162,7 @@ trainer.train()
 ## verifiers
 
 ```sh
-uv pip install './python[verifiers]'
+uv pip install 'miroir[verifiers]'
 export MIROIR_TOKEN=secret
 vf-run miroir-verifiers -m <model> \
   --env.taskset.urls_file urls.txt --env.taskset.token_var MIROIR_TOKEN --env.taskset.traces traces/

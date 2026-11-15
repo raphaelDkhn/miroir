@@ -75,7 +75,7 @@ docker run --rm -d -p 127.0.0.1:8000:8000 \
   -e MIROIR_TOKEN=secret gitea-env
 
 uv venv
-uv pip install ./python
+uv pip install miroir
 ```
 
 ```python
@@ -108,7 +108,7 @@ session.close()
 Use the included Verifiers integration with any OpenAI-compatible model.
 
 ```bash
-uv pip install './python[verifiers]'
+uv pip install 'miroir[verifiers]'
 
 export MIROIR_TOKEN=secret
 
@@ -128,7 +128,7 @@ vf-run miroir-verifiers -m <model> \
 ### Train with TRL
 
 ```bash
-uv pip install './python[trl]' 'trl[vllm]'
+uv pip install 'miroir[trl]' 'trl[vllm]'
 
 miroir pool --size 20 --urls urls.txt -- \
   python/tests/docker.sh gitea-env

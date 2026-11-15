@@ -38,7 +38,7 @@ Install the client:
 
 ```sh
 uv venv && source .venv/bin/activate
-uv pip install ./python
+uv pip install miroir
 ```
 
 Then play the `pay-invoice` task in Python:

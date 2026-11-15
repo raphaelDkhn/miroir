@@ -23,9 +23,8 @@ Two programs are called `miroir`:
 Run the image's commands as `docker run --rm IMAGE COMMAND`. They refuse to run under
 `docker exec`: Miroir must be the container's entrypoint, or a child of its init.
 
-The Python package is not on PyPI. Install it from a Miroir checkout (`uv pip install ./python`,
-`'./python[trl]'` or `'./python[verifiers]'`), or from git:
-`uv pip install 'miroir @ git+https://github.com/raphaelDkhn/miroir#subdirectory=python'`.
+Install the Python package from PyPI with `uv pip install miroir`; the adapters need
+`'miroir[trl]'` or `'miroir[verifiers]'`.
 
 ## Choose the job
 

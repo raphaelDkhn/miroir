@@ -34,7 +34,7 @@ Install the Python client:
 
 ```bash
 uv venv && source .venv/bin/activate
-uv pip install ./python
+uv pip install miroir
 ```
 
 Reset an episode, execute an action, and inspect its outcome:
