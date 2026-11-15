@@ -1262,8 +1262,8 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "mcp", specifier = "==1.30.0" },
-    { name = "openenv", specifier = "==0.10.0" },
-    { name = "pytest", specifier = "==9.1.1" },
+    { name = "openenv", specifier = "==0.12.0" },
+    { name = "pytest", specifier = "==9.2.0" },
 ]
 
 [[package]]
@@ -1368,7 +1368,7 @@ wheels = [
 
 [[package]]
 name = "openenv"
-version = "0.10.0"
+version = "0.12.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fastapi" },
@@ -1390,9 +1390,9 @@ dependencies = [
     { name = "uvicorn" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0e/8c/1d704592f8316c53b0b3eba2e6bde43dfc2d7cc3b8093c7459ab3cc2eb47/openenv-0.10.0.tar.gz", hash = "sha256:cd8eb54ad0a5af748591fd3d9a2eb0b046013ffb2a1342b6697e33af45e6cce8", size = 624073, upload-time = "2026-10-22T06:11:18.398Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f8/52/94c6c97a53f20626cd5e362df77a37b13b355c950930120075a3ad4ac847/openenv-0.12.0.tar.gz", hash = "sha256:746b8ed689622c6f52449a4fa5609e8495e48b1412806eae467440eb3e1a9231", size = 637832, upload-time = "2026-11-05T06:18:19.66Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/67/8e/46153b0f6f2127a42508cf6734650531d25e889a4cbd1916f35a9afb85e7/openenv-0.10.0-py3-none-any.whl", hash = "sha256:5e0a1019253802551de7890f7638c977c4a36540a4b19f01e5a6fcdb5f5fd135", size = 731246, upload-time = "2026-10-22T06:11:16.836Z" },
+    { url = "https://files.pythonhosted.org/packages/31/a7/f9e3fd06a24825776f2a68dd610a2323bdcb1a6e69cdb6be257f2e179c40/openenv-0.12.0-py3-none-any.whl", hash = "sha256:7323218b0b6dc72417c466d3fa84e37feab758be021f53f458cb64464391e15b", size = 745877, upload-time = "2026-11-05T06:18:17.358Z" },
 ]
 
 [[package]]
@@ -1795,7 +1795,7 @@ wheels = [
 
 [[package]]
 name = "pytest"
-version = "9.1.1"
+version = "9.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorama", marker = "sys_platform == 'win32'" },
@@ -1804,9 +1804,9 @@ dependencies = [
     { name = "pluggy" },
     { name = "pygments" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e4/47/b9efed96c114afcfa3c9d3fe98a76a1d14c74a9e266d397cf6eb64be5e01/pytest-9.1.1.tar.gz", hash = "sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313", size = 1636369, upload-time = "2026-06-19T10:58:32.857Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/79/42/bb4641652e58dedeac2ec51abc1f8cae4fee4ec63899a0999016229a0f2a/pytest-9.2.0.tar.gz", hash = "sha256:97c4f3b1f3c7414aa36465e09b8220f1d03627993bd51b1282e193753c80557b", size = 1797555, upload-time = "2026-10-27T21:30:20.728Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/24/25/1de2678b631f5a49215c6c96fff41ba892b0a34df68d6d80292b1b48aa7f/pytest-9.1.1-py3-none-any.whl", hash = "sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c", size = 386536, upload-time = "2026-06-19T10:58:31.347Z" },
+    { url = "https://files.pythonhosted.org/packages/51/39/1f5d8c8877a0fa327db959c19341d4be61660de1ab6b7391f9eb805bcd67/pytest-9.2.0-py3-none-any.whl", hash = "sha256:07acdcf88ec174f907dc01af70bf52d49b014bbab03faeeade31c96b18c2e588", size = 411776, upload-time = "2026-10-27T21:30:19.131Z" },
 ]
 
 [[package]]
