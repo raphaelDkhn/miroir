@@ -69,7 +69,7 @@ the check beside one, the two alone on an internal network. It uses the `miroir-
 image, or the one `SANDBOX_IMAGE` names:
 
 ```sh
-SANDBOX_IMAGE=ghcr.io/raphaeldkhn/miroir-sandbox:0.1 sandbox/check.sh my-env
+SANDBOX_IMAGE=ghcr.io/raphaeldkhn/miroir-sandbox:0.0 sandbox/check.sh my-env
 ```
 
 Arguments after the image go to `check`, such as `--json`.
