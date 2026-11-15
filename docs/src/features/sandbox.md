@@ -15,7 +15,7 @@ docker network create --internal -o com.docker.network.bridge.inhibit_ipv4=true 
 docker run -d --rm --name ep1-sandbox --network ep1 --network-alias sandbox \
   --read-only --tmpfs /work:exec,size=256m --tmpfs /tmp:exec,size=256m \
   --pids-limit 256 --memory 1g --security-opt no-new-privileges \
-  ghcr.io/raphaeldkhn/miroir-sandbox:0.1
+  ghcr.io/raphaeldkhn/miroir-sandbox:0.0
 docker create --rm --name ep1 -p 127.0.0.1::8000 -e MIROIR_TOKEN \
   -e MIROIR_SANDBOX=http://sandbox:8000 my-env
 docker network connect ep1 ep1

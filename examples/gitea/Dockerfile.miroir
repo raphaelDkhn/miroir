@@ -1,7 +1,7 @@
 # The stock Gitea image, unchanged, pinned by digest: the env adds Postgres, Python for the seed,
 # miroir, the manifest and the seed, which builds three worlds and writes their tasks at bake.
 ARG PRODUCT_IMAGE=gitea/gitea:28.3.0@sha256:8967bf9deaf3c5c4adae13519436dc1b20c646ac83fe37ae810c933a1045227d
-ARG MIROIR_IMAGE=ghcr.io/raphaeldkhn/miroir:0.1
+ARG MIROIR_IMAGE=ghcr.io/raphaeldkhn/miroir:0.0
 FROM ${MIROIR_IMAGE} AS miroir
 
 # Miroir runs every process of the env in this one container, so Postgres goes in too; python3

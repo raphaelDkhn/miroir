@@ -7,7 +7,7 @@ same image as the apps.
 ## Dockerfile
 
 ```dockerfile
-FROM ghcr.io/raphaeldkhn/miroir:0.1 AS miroir
+FROM ghcr.io/raphaeldkhn/miroir:0.0 AS miroir
 
 FROM your-product-image
 USER root

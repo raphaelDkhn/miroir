@@ -1,5 +1,5 @@
 ARG PRODUCT_IMAGE=ghcr.io/acme/mini-shop:1.0.0
-ARG MIROIR_IMAGE=ghcr.io/raphaeldkhn/miroir:0.1
+ARG MIROIR_IMAGE=ghcr.io/raphaeldkhn/miroir:0.0
 FROM ${MIROIR_IMAGE} AS miroir
 
 FROM debian:bookworm-slim AS tini

@@ -106,7 +106,7 @@ Tasks whose runs call `run_code` need a sandbox beside the env, alone on an inte
 ```sh
 docker network create --internal -o com.docker.network.bridge.inhibit_ipv4=true mycheck
 docker run -d --rm --name mycheck-sandbox --network mycheck --network-alias sandbox \
-  ghcr.io/raphaeldkhn/miroir-sandbox:0.1
+  ghcr.io/raphaeldkhn/miroir-sandbox:0.0
 docker run --rm --network mycheck -e MIROIR_SANDBOX=http://sandbox:8000 my-env check
 docker rm -f mycheck-sandbox && docker network rm mycheck
 ```

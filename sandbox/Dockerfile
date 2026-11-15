@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 ARG BASE_IMAGE=docker.io/library/debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
-ARG MIROIR_IMAGE=ghcr.io/raphaeldkhn/miroir:0.1
+ARG MIROIR_IMAGE=ghcr.io/raphaeldkhn/miroir:0.0
 FROM ${MIROIR_IMAGE} AS miroir
 
 FROM ${BASE_IMAGE}
