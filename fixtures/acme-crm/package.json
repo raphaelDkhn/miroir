@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "bullmq": "6.4.2",
+    "bullmq": "6.7.2",
     "ioredis": "6.0.0",
-    "nodemailer": "10.2.1",
+    "nodemailer": "10.4.0",
     "pg": "8.23.1"
   }
 }
