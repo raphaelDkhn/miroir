@@ -1,4 +1,4 @@
-"""Push the `miroir-verifiers` environment to Prime Intellect's Environments Hub, private.
+"""Push the `miroir-verifiers` environment to Prime Intellect's Environments Hub, public.
 
     python python/push_hub.py [PRIME ENV PUSH OPTIONS...]
 
@@ -55,7 +55,7 @@ def main() -> None:
             shutil.copytree(HERE / "src" / module, Path(stage) / module, ignore=ignored)
         staged = pyproject(project, time.gmtime())
         (Path(stage) / "pyproject.toml").write_text(staged, encoding="utf-8")
-        push = ["prime", "env", "push", "--path", stage, "--visibility", "PRIVATE", *sys.argv[1:]]
+        push = ["prime", "env", "push", "--path", stage, "--visibility", "PUBLIC", *sys.argv[1:]]
         sys.exit(subprocess.run(push, check=False).returncode)
 
 

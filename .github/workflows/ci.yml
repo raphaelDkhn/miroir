@@ -53,6 +53,7 @@ jobs:
       - run: uv run --locked ruff check .
       - run: uv run --locked ty check
       - run: uv run --locked pytest -q
+      - run: uv build
       - name: The Gitea example's worlds and task families
         working-directory: examples/gitea/seed
         run: uv run --no-project --with pyyaml==6.0.3 --with pytest==9.2.0 pytest -q
@@ -85,7 +86,7 @@ jobs:
           persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25  # v2.1.1
         with:
-          command: check advisories bans sources
+          command: check
 
   musl:
     strategy:

@@ -79,3 +79,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PRERELEASE: ${{ steps.tags.outputs.prerelease }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --prerelease="$PRERELEASE"
+
+  pypi:
+    needs: release
+    # PEP 440 spells prereleases differently from these tags, so only X.Y.Z tags reach PyPI.
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/p/miroir
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+      - name: The tag is the package's version
+        working-directory: python
+        run: test "$(uv version --short)" = "${GITHUB_REF_NAME#v}"
+      - run: uv build --out-dir dist python
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3

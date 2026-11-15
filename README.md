@@ -90,6 +90,11 @@ Use the [Miroir skill](skills/miroir/SKILL.md) to build environments, write task
 npx skills add raphaelDkhn/miroir
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report security issues privately, as
+[SECURITY.md](SECURITY.md) describes.
+
 ## License
 
 [Apache-2.0](LICENSE)
