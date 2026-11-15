@@ -4,9 +4,9 @@ The `miroir` Python package (Python 3.11 or later) leases containers and runs ep
 adapters build on it; use it directly for your own loop.
 
 ```sh
-uv pip install ./python               # the client and the host CLI
-uv pip install './python[trl]'        # with the TRL adapter
-uv pip install './python[verifiers]'  # with the verifiers adapter
+uv pip install miroir               # the client and the host CLI
+uv pip install 'miroir[trl]'        # with the TRL adapter
+uv pip install 'miroir[verifiers]'  # with the verifiers adapter
 ```
 
 ## An episode

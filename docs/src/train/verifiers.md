@@ -5,7 +5,7 @@ The `miroir-verifiers` environment runs an env's tasks under
 for training.
 
 ```sh
-uv pip install './python[verifiers]'
+uv pip install 'miroir[verifiers]'
 export MIROIR_TOKEN=secret
 vf-run miroir-verifiers -m <model> \
   --env.taskset.urls_file urls.txt --env.taskset.token_var MIROIR_TOKEN

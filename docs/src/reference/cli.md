@@ -23,7 +23,7 @@ or as a child of its init.
 
 ## On the host
 
-Install with `uv pip install ./python`.
+Install with `uv pip install miroir`.
 
 | Command | Does |
 |---|---|

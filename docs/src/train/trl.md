@@ -4,7 +4,7 @@
 factory whose methods are the agent's tools, and a reward function.
 
 ```sh
-uv pip install './python[trl]'
+uv pip install 'miroir[trl]'
 ```
 
 ```python
