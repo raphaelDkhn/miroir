@@ -11,4 +11,4 @@ uv pip install 'miroir[verifiers]'  # with the verifiers adapter
 ```
 
 Start with the [quick start](https://github.com/raphaelDkhn/miroir#quick-start), then the
-[client guide](https://github.com/raphaelDkhn/miroir/blob/master/docs/src/train/client.md).
+[client guide](https://raphaeldkhn.github.io/miroir/train/client.html).

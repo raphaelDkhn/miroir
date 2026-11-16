@@ -8,3 +8,4 @@ create-missing = false
 
 [output.html]
 git-repository-url = "https://github.com/raphaelDkhn/miroir"
+site-url = "/miroir/"
