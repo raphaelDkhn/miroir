@@ -67,10 +67,10 @@ The episode receives a reward of `1` only if the invoice is paid.
 
 ## Documentation
 
-- [Introduction](docs/src/introduction.md)
-- [How Miroir works](docs/src/introduction.md#how-it-works)
-- [Build an environment](docs/src/make/image.md)
-- [Train and evaluate](docs/src/run/serve.md)
+- [Introduction](https://raphaeldkhn.github.io/miroir/)
+- [How Miroir works](https://raphaeldkhn.github.io/miroir/introduction.html#how-it-works)
+- [Build an environment](https://raphaeldkhn.github.io/miroir/make/image.html)
+- [Train and evaluate](https://raphaeldkhn.github.io/miroir/run/serve.html)
 
 **[Gitea example](examples/gitea)** — Unmodified Gitea with 144 tasks across 12 task families.
 

@@ -10,7 +10,7 @@ dependencies = ["websockets>=15"]
 
 [project.urls]
 Repository = "https://github.com/raphaelDkhn/miroir"
-Documentation = "https://github.com/raphaelDkhn/miroir/tree/master/docs/src"
+Documentation = "https://raphaeldkhn.github.io/miroir/"
 
 [project.optional-dependencies]
 trl = ["trl>=1.17", "datasets>=4.7"]
