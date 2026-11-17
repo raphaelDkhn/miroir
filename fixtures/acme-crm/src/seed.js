@@ -38,7 +38,8 @@ const REPS = USERS.map((_, i) => i + 1).filter((id) => id !== 1 && id !== 12);
 
 const users = USERS.map((name, i) => {
   const email = `${name.split(" ")[0].toLowerCase()}@acme.test`;
-  return [i + 1, name, email, i === 0 ? "manager" : "rep", "active", ago(900 - i)];
+  const status = i + 1 === 12 ? "leaving" : "active";
+  return [i + 1, name, email, i === 0 ? "manager" : "rep", status, ago(900 - i)];
 });
 const tokens = users.map(([id, name]) => [
   id, id, `seed-token-${name.split(" ")[0].toLowerCase()}`, ago(400),

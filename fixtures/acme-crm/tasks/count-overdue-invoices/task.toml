@@ -1,0 +1,38 @@
+schema_version = "1.4"
+# What the grader reads: what the CRM changed in its database and what it sent out, written by
+# `miroir collect` after Harbor stops the agent's container.
+artifacts = [{ source = "/miroir/evidence", service = "acme-crm" }]
+
+[task]
+name = "acme/count-overdue-invoices"
+version = "1.0.0"
+description = "Count one customer's overdue invoices and write the number to the answer file."
+
+[agent]
+timeout_sec = 900.0
+
+[environment]
+docker_image = "miroir-main:dev"
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
+
+[verifier]
+timeout_sec = 120.0
+
+[verifier.environment]
+docker_image = "miroir:dev"
+workdir = "/tests"
+
+[verifier.env]
+MIROIR_SPEC = '''
+checks:
+  - name: answer
+    sql: SELECT number = 3 FROM answer
+allow: []
+'''
+
+[[verifier.collect]]
+service = "acme-crm"
+command = "miroir collect"
+timeout_sec = 120.0
