@@ -239,6 +239,15 @@ impl World {
         docker_ok(&["inspect", "--format", "{{.State.ExitCode}}", self.id()]).parse().unwrap()
     }
 
+    /// Wait until the world's log holds `text`.
+    pub fn wait_log(&self, text: &str) {
+        let deadline = Instant::now() + BOOT_LIMIT;
+        while !self.logs().contains(text) {
+            assert!(Instant::now() < deadline, "no {text:?} in time:\n{}", self.logs());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// Everything `miroir run` and the processes printed.
     pub fn logs(&self) -> String {
         text(&docker(&["logs", self.id()]))
