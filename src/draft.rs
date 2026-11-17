@@ -4,13 +4,16 @@
 //! What every run did is drafted: each row change gets an `allow` entry and a check, and each
 //! request, email and answer gets a check, over the values every run shares. Row changes match
 //! across runs by table, op and primary key, and inserts by their order, since the keys a product
-//! assigns differ between runs. What only some runs did, and the values that differ, are listed
-//! in comments after the spec. A printed draft always parses, and every run whose changes all the
-//! others made too scores reward 1 and harm 0 with it, unless it did what no spec admits (a
-//! truncate, a schema change or a fault), which a comment names.
+//! assigns differ between runs. A row change only some runs made is allowed but not checked. A
+//! check leaves out the values that differ between runs, those that are the key of a row the run
+//! inserted, and long text; comments after the spec name them, what only some runs did, and the
+//! dates and times the draft compares as constants. A printed draft always parses, and every run
+//! it was drafted from scores reward 1 and harm 0 with it, unless the run did what no spec admits
+//! (a truncate, a schema change or a fault), which a comment names.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -23,6 +26,22 @@ use crate::evidence::{self, ChangeOp, NetChange};
 use crate::grade::{self, Answer, allow_line, key_condition, sql_literal};
 use crate::paths::{self, Paths};
 use crate::spec::{self, Op};
+
+/// The longest text a check compares, in bytes: longer text is what a legitimate run words its own
+/// way, and enough of it would pass the spec's size limit.
+const CHECKED_BYTES: usize = 256;
+
+/// The errors Harbor records when its verifier failed after the run, such as on the void of a
+/// placeholder spec: the run and its evidence are whole.
+const VERIFIER_ERRORS: [&str; 4] = [
+    "RewardFileNotFoundError",
+    "RewardFileEmptyError",
+    "VerifierOutputParseError",
+    "VerifierTimeoutError",
+];
+
+/// Unix times from 2000 to 2100, in seconds.
+const UNIX_SECONDS: Range<i64> = 946_684_800..4_102_444_800;
 
 /// What to draft from.
 #[derive(Debug, Clone)]
@@ -41,6 +60,7 @@ pub fn run(args: &DraftArgs, out: &mut impl std::io::Write) -> anyhow::Result<bo
         );
     }
     let runs = read_all(&args.inputs)?;
+    distinct(&runs)?;
     let task = task(&runs)?;
     let draft = Draft::of(&runs);
     if draft.checks.is_empty() {
@@ -58,6 +78,8 @@ pub fn run(args: &DraftArgs, out: &mut impl std::io::Write) -> anyhow::Result<bo
 struct Run {
     /// The input as given.
     input: PathBuf,
+    /// The evidence file it was read from, as a canonical path.
+    evidence: PathBuf,
     /// The task its `result.json` names; `None` for an `evidence.db` input.
     task: Option<String>,
     changes: Vec<NetChange>,
@@ -94,7 +116,7 @@ async fn read(input: &Path) -> anyhow::Result<Run> {
     if !input.is_dir() {
         return recorded(input).await;
     }
-    let task = Some(task_name(input)?);
+    let task = Some(reference_task(input)?);
     let answer = read_answer(&artifact(input, paths::ANSWER))?;
     let run = recorded(&artifact(input, Paths::default().evidence())).await?;
     Ok(Run { input: input.to_path_buf(), task, answer, ..run })
@@ -107,16 +129,60 @@ fn artifact(trial: &Path, path: impl AsRef<Path>) -> PathBuf {
     trial.join("artifacts").join(path.strip_prefix("/").unwrap_or(path))
 }
 
-/// The task a trial directory's `result.json` names.
-fn task_name(trial: &Path) -> anyhow::Result<String> {
+/// The task a trial directory's `result.json` names, once the trial shows a whole run of the
+/// reference solution.
+fn reference_task(trial: &Path) -> anyhow::Result<String> {
     let path = trial.join("result.json");
     let text = std::fs::read_to_string(&path).with_context(|| {
         format!("{} is not a Harbor trial directory: cannot read its result.json", trial.display())
     })?;
     let result: Value = serde_json::from_str(&text)
         .with_context(|| format!("{} is not JSON: is the trial still running?", path.display()))?;
-    let name = result["task_name"].as_str().map(str::to_owned);
-    name.with_context(|| format!("{} names no task_name: is it a Harbor trial's?", path.display()))
+    let name = result["task_name"].as_str().with_context(|| {
+        format!("{} names no task_name: is it a Harbor trial's?", path.display())
+    })?;
+    if let Some(problem) = not_reference(trial, &result)? {
+        bail!(
+            "{} is not a whole run of the reference solution: {problem}. Draft from the trials \
+             of the oracle agent without SOLUTION, or pass the trial's evidence.db to draft from \
+             it anyway",
+            trial.display()
+        );
+    }
+    Ok(name.to_owned())
+}
+
+/// Why a trial is not a whole run of the reference solution, if it is not: another agent ran, or
+/// a probe (`SOLUTION`), or the solution failed (`agent/exit-code.txt`), or the trial failed
+/// before its verifier did.
+fn not_reference(trial: &Path, result: &Value) -> anyhow::Result<Option<String>> {
+    let text = |pointer: &str| result.pointer(pointer).and_then(Value::as_str);
+    match text("/config/agent/name").or_else(|| text("/config/agent/import_path")) {
+        Some("oracle") => {}
+        Some(agent) => return Ok(Some(format!("its agent is {agent}"))),
+        None => return Ok(Some("it names no agent".to_owned())),
+    }
+    if let Some(n) = text("/config/agent/env/SOLUTION").filter(|n| !n.is_empty()) {
+        return Ok(Some(format!("it runs probe {n} (SOLUTION={n})")));
+    }
+    let exit = exit_code(trial)?;
+    if exit != "0" {
+        return Ok(Some(format!("the solution exited with {exit} (agent/exit-code.txt)")));
+    }
+    let error = text("/exception_info/exception_type");
+    let error = error.filter(|kind| !VERIFIER_ERRORS.contains(kind));
+    Ok(error.map(|kind| format!("the trial failed with {kind}")))
+}
+
+/// What `agent/exit-code.txt` holds, which the oracle writes only when the solution fails; `0`
+/// without it.
+fn exit_code(trial: &Path) -> anyhow::Result<String> {
+    let path = trial.join("agent/exit-code.txt");
+    match std::fs::read_to_string(&path) {
+        Ok(code) => Ok(code.trim().to_owned()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("0".to_owned()),
+        Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
+    }
 }
 
 /// The answer in an answer file, read as the grader reads it: none unless it is a regular file,
@@ -129,6 +195,21 @@ fn read_answer(path: &Path) -> anyhow::Result<Answer> {
             .with_context(|| format!("cannot read the answer {}", path.display()))?;
     }
     Ok(grade::answer(&String::from_utf8_lossy(&bytes)))
+}
+
+/// Refuse a run given twice, as one path twice or as a trial and its evidence file: it would count
+/// as two runs that agree.
+fn distinct(runs: &[Run]) -> anyhow::Result<()> {
+    for (n, run) in runs.iter().enumerate() {
+        if let Some(earlier) = runs[..n].iter().find(|earlier| earlier.evidence == run.evidence) {
+            bail!(
+                "{} and {} are the same run: draft from different trials",
+                earlier.input.display(),
+                run.input.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The task the trial directories name, which must be one; `None` with `evidence.db` inputs only.
@@ -152,7 +233,8 @@ async fn recorded(path: &Path) -> anyhow::Result<Run> {
 }
 
 async fn record(path: &Path) -> anyhow::Result<Run> {
-    let scratch = Scratch::of(path)?;
+    let evidence = std::fs::canonicalize(path)?;
+    let scratch = Scratch::of(&evidence)?;
     let mut conn = evidence::open(&scratch.0).await?;
     let changes: Vec<ChangeRow> =
         sqlx::query_as("SELECT tbl, op, pk, before, after, columns FROM changes ORDER BY id")
@@ -169,6 +251,7 @@ async fn record(path: &Path) -> anyhow::Result<Run> {
     conn.close().await?;
     Ok(Run {
         input: path.to_path_buf(),
+        evidence,
         task: None,
         changes: changes.into_iter().map(change).collect::<Result<_, _>>()?,
         requests,
@@ -256,19 +339,32 @@ fn row_op(op: ChangeOp) -> Option<Op> {
     }
 }
 
+/// The column and value of the key a product gave an inserted row: its primary key, when that is
+/// one column. A composite key is made of the row's references, which the run chose.
+fn assigned(change: &NetChange) -> Option<(&String, &Value)> {
+    if change.op != ChangeOp::Insert || change.pk.len() != 1 {
+        return None;
+    }
+    change.pk.iter().next()
+}
+
 /// Something a run did that a check can hold: a row change, a request, an email or the answer.
 struct Item<'a> {
     /// What matches the same item in another run, once counted within its run (`matched`).
     key: String,
     /// How comments name it.
     label: String,
-    /// The table the `varies across runs` comment names its columns after.
+    /// The table the comments name its columns after.
     table: &'a str,
-    /// The values a check may compare: a change's row image (after an insert or update, before a
-    /// delete), an email's recipients and subject, or the answer's text.
+    /// The values a check may compare: those an update set, an inserted row, a keyless row as it
+    /// was deleted, an email's recipients and subject, or the answer's text. A keyed delete has
+    /// none: its key tells it.
     row: Map<String, Value>,
     /// The columns an update changed.
     changed: &'a [String],
+    /// The columns whose values `refer` took out of `row`, with the tables of the rows they are
+    /// the keys of.
+    refers: Vec<(String, BTreeSet<&'a str>)>,
     kind: Kind<'a>,
 }
 
@@ -292,6 +388,7 @@ impl Run {
             table: "sent_requests",
             row: Map::new(),
             changed: &[],
+            refers: Vec::new(),
             kind: Kind::Request(method, path),
         }));
         items.extend(self.emails.iter().map(|(recipients, subject)| Item {
@@ -303,6 +400,7 @@ impl Run {
                 ("subject", subject.as_deref().into()),
             ]),
             changed: &[],
+            refers: Vec::new(),
             kind: Kind::Email,
         }));
         items.extend(self.answer.value.as_ref().map(|value| Item {
@@ -311,9 +409,26 @@ impl Run {
             table: "answer",
             row: row([("value", value.as_str().into())]),
             changed: &[],
+            refers: Vec::new(),
             kind: Kind::Answer(&self.answer),
         }));
+        let inserted = self.inserted();
+        for item in &mut items {
+            item.refer(&inserted);
+        }
         items
+    }
+
+    /// The tables of the rows the run inserted, by the integer key the product gave each: another
+    /// run may give the same row another key.
+    fn inserted(&self) -> BTreeMap<i64, BTreeSet<&str>> {
+        let mut inserted: BTreeMap<i64, BTreeSet<&str>> = BTreeMap::new();
+        for change in &self.changes {
+            if let Some(key) = assigned(change).and_then(|(_, key)| key.as_i64()) {
+                inserted.entry(key).or_default().insert(&change.tbl);
+            }
+        }
+        inserted
     }
 }
 
@@ -321,19 +436,60 @@ impl Run {
 /// keyed by its table and primary key; an insert only by its table, so that it matches by order.
 fn change_item(change: &NetChange) -> Option<Item<'_>> {
     let op = row_op(change.op)?;
-    let (image, key) = match op {
-        Op::Insert => (&change.after, Value::Null),
-        Op::Update => (&change.after, Value::Object(change.pk.clone())),
-        Op::Delete => (&change.before, Value::Object(change.pk.clone())),
+    let changed = change.columns.as_deref().unwrap_or_default();
+    let after = change.after.clone().unwrap_or_default();
+    let row = match op {
+        Op::Insert => after,
+        Op::Update => only(&after, |column, _| changed.contains(column)),
+        Op::Delete if change.pk.is_empty() => change.before.clone().unwrap_or_default(),
+        Op::Delete => Map::new(),
     };
+    let key = if op == Op::Insert { Value::Null } else { Value::Object(change.pk.clone()) };
     Some(Item {
         key: json!(["change", change.tbl, op.as_str(), key]).to_string(),
         label: label(change),
         table: &change.tbl,
-        row: image.clone().unwrap_or_default(),
-        changed: change.columns.as_deref().unwrap_or_default(),
+        row,
+        changed,
+        refers: Vec::new(),
         kind: Kind::Change(change, op),
     })
+}
+
+impl<'a> Item<'a> {
+    /// Take out of `row` each value that is the key of a row the run inserted (`inserted`), into
+    /// `refers`: that of a column named as a reference is (`label_id`, `labelId`), unless it is
+    /// the inserted row's own key, and the answer when any of its ids is. Other integers, such as
+    /// flags and counts, stay, since a table that starts empty gives its first rows small keys.
+    fn refer(&mut self, inserted: &BTreeMap<i64, BTreeSet<&'a str>>) {
+        let refers = |column: &String| column.ends_with("_id") || column.ends_with("Id");
+        let columns: Vec<String> = match self.kind {
+            Kind::Change(change, _) => {
+                let own = assigned(change).map(|(column, _)| column);
+                let named = |column: &&String| refers(column) && Some(*column) != own;
+                self.row.keys().filter(named).cloned().collect()
+            }
+            Kind::Answer(_) => self.row.keys().cloned().collect(),
+            Kind::Request(..) | Kind::Email => return,
+        };
+        for column in columns {
+            let keys: Vec<i64> = match self.kind {
+                Kind::Answer(answer) => {
+                    let ids = answer.ids.iter().flat_map(|ids| ids.split(','));
+                    ids.filter_map(|id| id.parse().ok()).collect()
+                }
+                Kind::Change(..) | Kind::Request(..) | Kind::Email => {
+                    self.row.get(&column).and_then(Value::as_i64).into_iter().collect()
+                }
+            };
+            let tables: BTreeSet<&'a str> =
+                keys.iter().filter_map(|key| inserted.get(key)).flatten().copied().collect();
+            if !tables.is_empty() {
+                self.row.remove(&column);
+                self.refers.push((column, tables));
+            }
+        }
+    }
 }
 
 /// The items of every run grouped by key, in the order keys first appear; a group holds the item
@@ -374,17 +530,23 @@ fn split(group: &[&Item]) -> (Map<String, Value>, Vec<String>) {
     (stable, varying)
 }
 
-/// A draft spec: what every run did alike, and notes on the rest.
+/// A draft spec: what the runs did, and notes on what it leaves to the reviewer.
 #[derive(Default)]
 struct Draft {
     /// The name and SQL of each check.
     checks: Vec<(String, String)>,
     /// The paste-ready `allow` lines, in evidence order.
     allow: Vec<String>,
-    /// What the reviewer must know: what only some runs did, and changes with no check.
+    /// What only some runs did, and what is checked or allowed whatever its values.
     notes: Vec<String>,
     /// `table.column` for each value that differs between runs.
     varying: BTreeSet<String>,
+    /// `table.column` for each value that is the key of a row a run inserted, with its tables.
+    refers: BTreeMap<String, BTreeSet<String>>,
+    /// `table.column` for each text too long to check.
+    long: BTreeSet<String>,
+    /// `table.column` for each date or time the draft compares as a constant.
+    times: BTreeSet<String>,
 }
 
 impl Draft {
@@ -393,71 +555,114 @@ impl Draft {
         let mut draft = Draft::default();
         for group in matched(&items) {
             let first = group[0];
-            if group.len() < runs.len() {
-                let seen =
-                    format!("seen in {} of {} runs: {}", group.len(), runs.len(), first.label);
-                draft.notes.push(seen);
-                continue;
+            let every = group.len() == runs.len();
+            if !every {
+                let (seen, of) = (group.len(), runs.len());
+                draft.note(format!("seen in {seen} of {of} runs: {}", first.label));
             }
-            let (stable, varying) = split(&group);
-            draft.varying.extend(varying.iter().map(|column| format!("{}.{column}", first.table)));
-            draft.add(first.kind, &group, &stable);
+            let stable = draft.shared(&group);
+            draft.add(first.kind, &group, &stable, every);
         }
         draft
     }
 
-    /// Draft what every run did alike, given the values they share.
-    fn add(&mut self, kind: Kind, group: &[&Item], stable: &Map<String, Value>) {
+    /// The values every item of `group` holds alike that are short enough to check; the notes
+    /// name the others.
+    fn shared(&mut self, group: &[&Item]) -> Map<String, Value> {
+        let table = group[0].table;
+        for (column, tables) in group.iter().flat_map(|item| &item.refers) {
+            let named = self.refers.entry(format!("{table}.{column}")).or_default();
+            named.extend(tables.iter().map(|table| (*table).to_owned()));
+        }
+        let (stable, varying) = split(group);
+        self.varying.extend(varying.iter().map(|column| format!("{table}.{column}")));
+        let (long, short): (Map<String, Value>, Map<String, Value>) = stable
+            .into_iter()
+            .partition(|(_, value)| value.as_str().is_some_and(|text| text.len() > CHECKED_BYTES));
+        self.long.extend(long.keys().map(|column| format!("{table}.{column}")));
+        short
+    }
+
+    /// Draft what the runs did, given the values they share: a row change gets its `allow` entry,
+    /// and anything every run did gets its check.
+    fn add(&mut self, kind: Kind, group: &[&Item], stable: &Map<String, Value>, every: bool) {
         match kind {
-            Kind::Change(change, Op::Update) => self.update(change, group, stable),
-            Kind::Change(change, Op::Delete) => self.delete(change),
-            Kind::Change(change, Op::Insert) => self.insert(change, stable),
+            Kind::Change(change, Op::Update) => self.update(change, group, stable, every),
+            Kind::Change(change, Op::Delete) if !change.pk.is_empty() => self.delete(change, every),
+            Kind::Change(change, op) => self.by_values(change, op, stable, every),
+            _ if !every => {}
             Kind::Request(method, path) => self.request(method, path),
-            Kind::Email => {
-                let sql = select("count(*) >= 1", "sent_emails", &[key_condition(stable)]);
-                self.check("email", sql);
-            }
+            Kind::Email => self.email(stable),
             Kind::Answer(answer) => self.answer(answer, stable),
         }
     }
 
-    /// An update: allowed on its row for every column a run changed, and checked on the changed
-    /// columns every run left alike. When those all differ there is no check, and a note says so.
-    fn update(&mut self, change: &NetChange, group: &[&Item], stable: &Map<String, Value>) {
+    /// An update: allowed on its row for every column a run changed, and checked on the values
+    /// every run set alike. When there are none there is no check, and a note says so.
+    fn update(
+        &mut self,
+        change: &NetChange,
+        group: &[&Item],
+        set: &Map<String, Value>,
+        every: bool,
+    ) {
         let changed: BTreeSet<&String> = group.iter().flat_map(|item| item.changed).collect();
-        let columns: Vec<String> = changed.iter().map(|column| (*column).clone()).collect();
+        let columns: Vec<String> = changed.into_iter().cloned().collect();
+        self.timed(&change.tbl, &change.pk);
         self.allow(allow_line(&change.tbl, Op::Update, Some(&columns), &change.pk));
-        let set = only(stable, |column, _| changed.contains(column));
-        if set.is_empty() {
-            let note = "every column it changes varies across runs";
-            self.notes.push(format!("no check for {}: {note}", label(change)));
+        if !every {
             return;
         }
+        if set.is_empty() {
+            let why = "every value it sets varies across runs, is a new row's key or is too long";
+            self.note(format!("no check for {}: {why}", label(change)));
+            return;
+        }
+        self.timed(&change.tbl, set);
         let from = rows("after", &change.tbl);
-        let sql = select("count(*)", &from, &[key_condition(&change.pk), key_condition(&set)]);
+        let sql = select("count(*)", &from, &[key_condition(&change.pk), key_condition(set)]);
         self.check(&format!("{} {}", change.tbl, key_words(&change.pk)), sql);
     }
 
-    /// A delete: allowed and checked by its key.
-    fn delete(&mut self, change: &NetChange) {
+    /// A delete of a keyed row: allowed and checked by its key.
+    fn delete(&mut self, change: &NetChange, every: bool) {
+        self.timed(&change.tbl, &change.pk);
         self.allow(allow_line(&change.tbl, Op::Delete, None, &change.pk));
-        let deleted = Some("_op = 'delete'".to_owned());
-        let from = rows("before", &change.tbl);
-        let sql = select("count(*)", &from, &[deleted, key_condition(&change.pk)]);
-        self.check(&format!("{} {} deleted", change.tbl, key_words(&change.pk)), sql);
+        if every {
+            let deleted = Some("_op = 'delete'".to_owned());
+            let from = rows("before", &change.tbl);
+            let sql = select("count(*)", &from, &[deleted, key_condition(&change.pk)]);
+            self.check(&format!("{} {} deleted", change.tbl, key_words(&change.pk)), sql);
+        }
     }
 
-    /// An insert: allowed where its stable integer and boolean columns hold, so that differently
-    /// worded text is no harm, and checked on every stable column but its key.
-    fn insert(&mut self, change: &NetChange, stable: &Map<String, Value>) {
-        let values = only(stable, |column, _| !change.pk.contains_key(column));
-        let numbers =
-            only(&values, |_, value| value.is_i64() || value.is_u64() || value.is_boolean());
-        self.allow(allow_line(&change.tbl, Op::Insert, None, &numbers));
-        let inserted = Some("_op = 'insert'".to_owned());
-        let from = rows("after", &change.tbl);
-        let sql = select("count(*) >= 1", &from, &[inserted, key_condition(&values)]);
-        self.check(&format!("{} inserted", change.tbl), sql);
+    /// An insert, or a delete from a keyless table, which only its values tell apart: allowed
+    /// where its integer and boolean values hold, so that differently worded text is no harm, and
+    /// checked on every value. An inserted row's own key is in neither.
+    fn by_values(&mut self, change: &NetChange, op: Op, stable: &Map<String, Value>, every: bool) {
+        let own = assigned(change).map(|(column, _)| column);
+        let values = only(stable, |column, _| Some(column) != own);
+        let narrow = only(&values, |_, value| narrows(value));
+        let what = format!("{} {}", change.tbl, op.as_str());
+        if narrow.is_empty() {
+            let why = "no integer or boolean value every run shares narrows it";
+            self.note(format!("the allow entry for {what} admits any row: {why}"));
+        }
+        self.allow(allow_line(&change.tbl, op, None, &narrow));
+        if !every {
+            return;
+        }
+        if values.is_empty() {
+            let why = "no value every run shares narrows it";
+            self.note(format!("the check for {what} passes for any row: {why}"));
+        }
+        self.timed(&change.tbl, &values);
+        let (image, done) =
+            if op == Op::Delete { ("before", "deleted") } else { ("after", "inserted") };
+        let filter = Some(format!("_op = '{}'", op.as_str()));
+        let sql =
+            select("count(*) >= 1", &rows(image, &change.tbl), &[filter, key_condition(&values)]);
+        self.check(&format!("{} {done}", change.tbl), sql);
     }
 
     /// A request every run sent: checked by method and path.
@@ -467,10 +672,22 @@ impl Draft {
         self.check(&format!("{method} {path}"), sql);
     }
 
+    /// An email every run sent: checked on the recipients and subject every run gave it alike.
+    fn email(&mut self, stable: &Map<String, Value>) {
+        if stable.is_empty() {
+            let why = "no recipients or subject every run shares narrows it";
+            self.note(format!("the check for an email passes for any email: {why}"));
+        }
+        self.timed("sent_emails", stable);
+        let sql = select("count(*) >= 1", "sent_emails", &[key_condition(stable)]);
+        self.check("email", sql);
+    }
+
     /// The answer, when every run gave the same: as a number, else as ids when normalizing them
     /// changes the text, else as text.
     fn answer(&mut self, answer: &Answer, stable: &Map<String, Value>) {
         let Some(Value::String(value)) = stable.get("value") else { return };
+        self.timed("answer", stable);
         let condition = if let Some(number) = answer.number {
             format!("number = {}", sql_literal(&number.into()))
         } else if let Some(ids) = answer.ids.as_deref().filter(|ids| ids != value) {
@@ -506,6 +723,20 @@ impl Draft {
         }
     }
 
+    /// Add a note, unless the same note is there.
+    fn note(&mut self, note: String) {
+        if !self.notes.contains(&note) {
+            self.notes.push(note);
+        }
+    }
+
+    /// Name the dates and times among `values`, which the draft compares as constants, though
+    /// every boot moves the world's dates to its own day (§3.5 step 5).
+    fn timed(&mut self, table: &str, values: &Map<String, Value>) {
+        let times = values.iter().filter(|(_, value)| timelike(value));
+        self.times.extend(times.map(|(column, _)| format!("{table}.{column}")));
+    }
+
     /// The draft: its header, the spec, and the notes for the reviewer.
     fn text(&self, runs: &[Run], task: Option<&str>) -> String {
         let mut lines = vec!["checks:".to_owned()];
@@ -527,13 +758,22 @@ impl Draft {
         comment(&format!("nothing to draft: {reason}")) + &self.footer(runs)
     }
 
-    /// The comments after the spec: the notes, the values that vary, and the runs that are harm.
+    /// The comments after the spec: the notes, the values left out of checks or compared as
+    /// constants, and the runs that are harm.
     fn footer(&self, runs: &[Run]) -> String {
         let mut notes = self.notes.clone();
-        if !self.varying.is_empty() {
-            let varying: Vec<&str> = self.varying.iter().map(String::as_str).collect();
-            notes.push(format!("varies across runs: {}", varying.join(", ")));
+        notes.extend(listed("varies across runs", &self.varying));
+        for (column, tables) in &self.refers {
+            let tables: Vec<&str> = tables.iter().map(String::as_str).collect();
+            notes.push(format!(
+                "{column} is the key of a new {} row, which the product assigns: match that row \
+                 by its content (authoring rule 4)",
+                tables.join(" or ")
+            ));
         }
+        notes.extend(listed(&format!("not checked, over {CHECKED_BYTES} bytes"), &self.long));
+        let times = "dates and times compared as constants, which may not hold on another day";
+        notes.extend(listed(&format!("{times} (authoring rule 5)"), &self.times));
         notes.extend(runs.iter().filter_map(harm));
         notes.iter().map(|note| comment(note)).collect()
     }
@@ -548,8 +788,11 @@ fn header(runs: &[Run], task: Option<&str>) -> String {
     lines.push("A draft checks what the reference did, not what the task asks:".into());
     lines.push("review every line, move invariants to gates, and add probes.".into());
     if runs.len() == 1 {
-        lines.push("From one run every value looks stable: run the oracle with -k 2,".into());
-        lines.push("then draft from both trials to find the values that vary.".into());
+        let advice = [
+            "From one run every value looks stable: run the oracle with -k 2 -n 1 (one attempt",
+            "after the other), then draft from both trials to find the values that vary.",
+        ];
+        lines.extend(advice.map(str::to_owned));
     }
     lines.iter().map(|line| comment(line)).collect()
 }
@@ -573,6 +816,41 @@ fn label(change: &NetChange) -> String {
     } else {
         format!("{tbl} {op} {}", Value::Object(change.pk.clone()))
     }
+}
+
+/// `about: a, b` for the names in `names`; `None` when there are none.
+fn listed(about: &str, names: &BTreeSet<String>) -> Option<String> {
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    (!names.is_empty()).then(|| format!("{about}: {}", names.join(", ")))
+}
+
+/// Whether an `allow` entry may hold a value of an insert, or of a delete from a keyless table:
+/// an integer or a boolean, which a run does not word its own way, unless it may be a time, which
+/// moves with the day.
+fn narrows(value: &Value) -> bool {
+    (value.is_i64() || value.is_u64() || value.is_boolean()) && !timelike(value)
+}
+
+/// Whether `value` looks like a date, a timestamp, or a Unix time from 2000 to 2100 in seconds
+/// or milliseconds, as the evidence holds them (§4.4): each boot moves those to its own day.
+fn timelike(value: &Value) -> bool {
+    match value {
+        Value::String(text) => dated(text),
+        Value::Number(number) => number
+            .as_i64()
+            .is_some_and(|n| UNIX_SECONDS.contains(&n) || UNIX_SECONDS.contains(&(n / 1000))),
+        Value::Null | Value::Bool(_) | Value::Array(_) | Value::Object(_) => false,
+    }
+}
+
+/// Whether `text` is a date, `YYYY-MM-DD`, or a timestamp that starts with one and a `T`.
+fn dated(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let shape = (0..10).all(|at| {
+        let byte = bytes.get(at).copied().unwrap_or_default();
+        if at == 4 || at == 7 { byte == b'-' } else { byte.is_ascii_digit() }
+    });
+    shape && bytes.get(10).is_none_or(|byte| *byte == b'T')
 }
 
 /// A key's values, as words of a check name.
@@ -636,10 +914,12 @@ fn plain(c: char) -> bool {
     c == '\t' || !(c.is_control() || c == '\u{fffe}' || c == '\u{ffff}')
 }
 
-/// A YAML comment line holding `text`, with the characters a comment cannot hold escaped.
+/// A YAML comment line holding `text`, with the characters a comment cannot hold escaped, and no
+/// three `'` in a row, which the TOML literal string a spec is pasted into cannot hold.
 fn comment(text: &str) -> String {
     let escaped = |c: char| if plain(c) { c.to_string() } else { c.escape_default().to_string() };
-    format!("# {}\n", text.chars().map(escaped).collect::<String>())
+    let text: String = text.chars().map(escaped).collect();
+    format!("# {}\n", text.replace("''", "'\\'"))
 }
 
 /// `sql` as the value of a `sql:` key: a literal block, or a double-quoted scalar with escapes
@@ -772,21 +1052,34 @@ mod tests {
                "subject": subject, "text": "Hello", "html": null}})
     }
 
-    /// A Harbor trial directory of `task` whose evidence is `evidence`, with an answer file
-    /// holding `answer` when it is given.
+    /// A Harbor trial directory of the oracle's run of `task` whose evidence is `evidence`, with
+    /// an answer file holding `answer` when it is given.
     async fn trial(dir: &Path, task: &str, evidence: &Evidence, answer: Option<&str>) -> PathBuf {
         let trial = dir.join(format!("trial-{}", std::fs::read_dir(dir).unwrap().count()));
         let path = trial.join(EVIDENCE);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         evidence::write(&path, evidence).await.unwrap();
         let name = trial.file_name().unwrap().to_str().unwrap();
-        let result = json!({"trial_name": name, "task_name": task, "reward_valid": true});
+        let result = json!({"trial_name": name, "task_name": task, "reward_valid": true,
+                            "config": {"agent": {"name": "oracle", "model_name": null, "env": {}}},
+                            "exception_info": null});
         std::fs::write(trial.join("result.json"), result.to_string()).unwrap();
         if let Some(answer) = answer {
             std::fs::create_dir_all(trial.join(ANSWER).parent().unwrap()).unwrap();
             std::fs::write(trial.join(ANSWER), answer).unwrap();
         }
         trial
+    }
+
+    /// A change to a trial's `result.json`.
+    type Edit = fn(&mut Value);
+
+    /// Change a trial's `result.json` with `edit`.
+    fn rewrite(trial: &Path, edit: impl FnOnce(&mut Value)) {
+        let path = trial.join("result.json");
+        let mut result: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        edit(&mut result);
+        std::fs::write(path, result.to_string()).unwrap();
     }
 
     /// An `evidence.db` file holding `evidence`.
@@ -898,14 +1191,18 @@ mod tests {
             "# Draft MIROIR_SPEC for acme/pay-invoice from 1 run:\n#   {}\n\
              # A draft checks what the reference did, not what the task asks:\n\
              # review every line, move invariants to gates, and add probes.\n\
-             # From one run every value looks stable: run the oracle with -k 2,\n\
-             # then draft from both trials to find the values that vary.\nchecks:\n",
+             # From one run every value looks stable: run the oracle with -k 2 -n 1 (one attempt\n\
+             # after the other), then draft from both trials to find the values that vary.\n\
+             checks:\n",
             a.display()
         );
         assert!(text.starts_with(&header), "{text}");
         let checked = "WHERE id = 4001 AND paid_at = '2026-11-17T10:00:00+00:00' \
                        AND payment_intent = 'pi_test' AND status = 'paid'\n";
         assert!(text.contains(checked), "{text}");
+        let times = "\n# dates and times compared as constants, which may not hold on another \
+                     day (authoring rule 5): invoices.paid_at\n";
+        assert!(text.ends_with(times), "{text}");
         assert!(!text.contains("varies"), "{text}");
     }
 
@@ -980,15 +1277,20 @@ mod tests {
                 "  - {table: notes, op: insert}",
             ]
         );
-        let varying = "# varies across runs: notes.deal_id, notes.id, notes.pinned, notes.text\n";
-        assert!(text.ends_with(varying), "{text}");
+        let footer = "# the allow entry for notes insert admits any row: no integer or boolean \
+                      value every run shares narrows it\n\
+                      # varies across runs: notes.deal_id, notes.id, notes.pinned, notes.text\n\
+                      # dates and times compared as constants, which may not hold on another \
+                      day (authoring rule 5): notes.created_at\n";
+        assert!(text.ends_with(footer), "{text}");
     }
 
-    /// Contact 2046 merged into 2045: its deals moved over, at `at`, and it was deleted.
+    /// Contact 2046 merged into 2045: its deals moved over, at `at`, and it was deleted. The
+    /// contact as deleted was seen at `at` too, as a boot on another day moves a baked time.
     fn merged(at: &str) -> Evidence {
         let deal = |id: i64| json!({"id": id, "contact_id": 2046, "updated_at": "2026-11-01"});
         let set = json!({"contact_id": 2045, "updated_at": at});
-        let contact = json!({"id": 2046, "name": "Ann Lee", "company": "Initech"});
+        let contact = json!({"id": 2046, "name": "Ann Lee", "company": "Initech", "seen_at": at});
         let changes = vec![
             update("deals", deal(3101), set.clone()),
             update("deals", deal(3102), set),
@@ -1080,19 +1382,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_change_only_some_runs_made_is_named_not_drafted() {
+    async fn a_change_only_some_runs_made_is_allowed_and_named_but_not_checked() {
         let dir = new_dir();
         let at = "2026-11-17T10:00:00+00:00";
         let extra = plus(paid(at), update("invoices", invoice(4020), json!({"status": "void"})));
         let a = trial(&dir, PAY, &extra, None).await;
         let b = trial(&dir, PAY, &paid(at), None).await;
-        let (result, text) = drafted(&[&a, &b]);
-        assert!(result.unwrap(), "{text}");
-        assert!(text.ends_with("# seen in 1 of 2 runs: invoices update {\"id\":4020}\n"), "{text}");
-        assert!(!spec_lines(&text).iter().any(|line| line.contains("4020")), "{text}");
-        // The draft leaves it out of scope, so the run that made it is harm.
-        assert_eq!(graded(&text, &b).await, scored(1.0, 0));
-        assert_eq!(graded(&text, &a).await, scored(0.0, 1));
+        let text = contract(&[&a, &b]).await;
+        let lines = spec_lines(&text);
+        let allow = "  - {table: invoices, op: update, columns: [status], where: \"id = 4020\"}";
+        assert!(lines.contains(&allow), "{text}");
+        assert_eq!(lines.iter().filter(|line| line.contains("4020")).count(), 1, "{text}");
+        assert!(
+            text.contains("\n# seen in 1 of 2 runs: invoices update {\"id\":4020}\n"),
+            "{text}"
+        );
     }
 
     #[tokio::test]
@@ -1227,9 +1531,10 @@ mod tests {
         let allow = "  - {table: deals, op: update, columns: [updated_at], where: \"id = 7\"}";
         assert!(lines.contains(&allow), "{text}");
         assert!(!lines.iter().any(|line| line.contains("deals_7")), "{text}");
-        let note = "# no check for deals update {\"id\":7}: every column it changes varies \
-                    across runs\n# varies across runs: deals.updated_at\n";
-        assert!(text.ends_with(note), "{text}");
+        let note = "# no check for deals update {\"id\":7}: every value it sets varies across \
+                    runs, is a new row's key or is too long\n\
+                    # varies across runs: deals.updated_at\n";
+        assert!(text.contains(note), "{text}");
     }
 
     #[tokio::test]
@@ -1277,7 +1582,8 @@ mod tests {
         assert_eq!(
             printed,
             "# nothing to draft: no check holds in every run\n\
-             # no check for deals update {\"id\":7}: every column it changes varies across runs\n\
+             # no check for deals update {\"id\":7}: every value it sets varies across runs, is \
+             a new row's key or is too long\n\
              # varies across runs: deals.updated_at\n"
         );
     }
@@ -1334,6 +1640,15 @@ mod tests {
         let check = "      SELECT count(*) >= 1 FROM sent_emails WHERE subject = 'Welcome'";
         assert!(spec_lines(&text).contains(&check), "{text}");
         assert!(text.ends_with("# varies across runs: sent_emails.recipients\n"), "{text}");
+        let other = evidence(Vec::new(), vec![email("ops@acme.test", Some("Hello"))]);
+        let c = trial(&dir, PAY, &other, None).await;
+        let text = contract(&[&a, &c]).await;
+        let any = "      SELECT count(*) >= 1 FROM sent_emails";
+        assert!(spec_lines(&text).contains(&any), "{text}");
+        let footer = "# the check for an email passes for any email: no recipients or subject \
+                      every run shares narrows it\n\
+                      # varies across runs: sent_emails.recipients, sent_emails.subject\n";
+        assert!(text.ends_with(footer), "{text}");
     }
 
     #[tokio::test]
@@ -1407,21 +1722,21 @@ mod tests {
         let b = trial(&dir, PAY, &run, Some("4")).await;
         let text = contract(&[&a, &b]).await;
         assert!(!spec_lines(&text).iter().any(|line| line.contains("answer")), "{text}");
-        assert!(text.ends_with("# varies across runs: answer.value\n"), "{text}");
+        assert!(text.contains("\n# varies across runs: answer.value\n"), "{text}");
         let c = file(&dir, &run).await;
         let text = contract(&[&a, &c]).await;
-        assert!(text.ends_with("# seen in 1 of 2 runs: answer\n"), "{text}");
+        assert!(text.contains("\n# seen in 1 of 2 runs: answer\n"), "{text}");
         assert!(text.starts_with("# Draft MIROIR_SPEC for acme/pay-invoice from 2 runs:\n"));
     }
 
     #[tokio::test]
-    async fn keyless_rows_match_by_order_and_merge_identical_entries() {
+    async fn keyless_rows_are_told_apart_by_their_values_and_identical_entries_merge() {
         let dir = new_dir();
-        let tag = |label: &str| json!({"deal_id": 1100, "label": label});
+        let tag = |deal: i64, label: &str| json!({"deal_id": deal, "label": label});
         let changes = vec![
-            delete("tags", tag("hot")),
-            delete("tags", tag("hot")),
-            insert("tags", tag("won")),
+            delete("tags", tag(1100, "hot")),
+            delete("tags", tag(1100, "hot")),
+            insert("tags", tag(1100, "won")),
         ];
         let a = trial(&dir, PAY, &evidence(changes.clone(), Vec::new()), None).await;
         let b = trial(&dir, PAY, &evidence(changes, Vec::new()), None).await;
@@ -1432,16 +1747,49 @@ mod tests {
                 "checks:",
                 "  - name: tags_deleted",
                 "    sql: |-",
-                "      SELECT count(*) FROM before.\"tags\" WHERE _op = 'delete'",
+                "      SELECT count(*) >= 1 FROM before.\"tags\" WHERE _op = 'delete' \
+                 AND deal_id = 1100 AND label = 'hot'",
                 "  - name: tags_inserted",
                 "    sql: |-",
                 "      SELECT count(*) >= 1 FROM after.\"tags\" WHERE _op = 'insert' \
                  AND deal_id = 1100 AND label = 'won'",
                 "allow:",
-                "  - {table: tags, op: delete}",
+                "  - {table: tags, op: delete, where: \"deal_id = 1100\"}",
                 "  - {table: tags, op: insert, where: \"deal_id = 1100\"}",
             ]
         );
+        let elsewhere = vec![delete("tags", tag(1101, "hot")), insert("tags", tag(1100, "won"))];
+        let elsewhere = trial(&dir, PAY, &evidence(elsewhere, Vec::new()), None).await;
+        assert_eq!(graded(&text, &elsewhere).await, scored(0.0, 1));
+    }
+
+    #[tokio::test]
+    async fn entries_and_checks_that_admit_any_row_are_named() {
+        let dir = new_dir();
+        let tag = |label: &str| json!({"label": label, "color": "red"});
+        let a = evidence(vec![insert("tags", tag("hot")), delete("tags", tag("cold"))], Vec::new());
+        let b = evidence(vec![insert("tags", tag("won")), delete("tags", tag("lost"))], Vec::new());
+        let (a, b) = (trial(&dir, PAY, &a, None).await, trial(&dir, PAY, &b, None).await);
+        let text = contract(&[&a, &b]).await;
+        let lines = spec_lines(&text);
+        let check = "      SELECT count(*) >= 1 FROM after.\"tags\" WHERE _op = 'insert' \
+                     AND color = 'red'";
+        assert!(lines.contains(&check) && lines.contains(&"  - {table: tags, op: insert}"));
+        let footer = "# the allow entry for tags insert admits any row: no integer or boolean \
+                      value every run shares narrows it\n\
+                      # the allow entry for tags delete admits any row: no integer or boolean \
+                      value every run shares narrows it\n\
+                      # varies across runs: tags.label\n";
+        assert!(text.ends_with(footer), "{text}");
+        let colorless = |label: &str| insert("tags", json!({"label": label}));
+        let a = trial(&dir, PAY, &evidence(vec![colorless("hot")], Vec::new()), None).await;
+        let b = trial(&dir, PAY, &evidence(vec![colorless("won")], Vec::new()), None).await;
+        let text = contract(&[&a, &b]).await;
+        let check = "      SELECT count(*) >= 1 FROM after.\"tags\" WHERE _op = 'insert'";
+        assert!(spec_lines(&text).contains(&check), "{text}");
+        let any = "# the check for tags insert passes for any row: no value every run shares \
+                   narrows it\n";
+        assert!(text.contains(any), "{text}");
     }
 
     #[tokio::test]
@@ -1463,6 +1811,240 @@ mod tests {
         assert!(text.ends_with(&harm), "{text}");
         assert_eq!(graded(&text, &a).await, scored(0.0, 1));
         assert_eq!(graded(&text, &b).await, scored(1.0, 0));
+    }
+
+    /// Role `role` granted to user `user`: a row of a table keyed by both.
+    fn granted(user: i64, role: i64) -> NetChange {
+        let mut grant = insert("user_roles", json!({"user_id": user, "role_id": role, "on": true}));
+        grant.pk = object(json!({"user_id": user, "role_id": role}));
+        grant
+    }
+
+    /// Label `label` created and put on issue 3 (link `link`), milestone `milestone` created and
+    /// set on issue 3, and role `role` created and granted to user 9: the keys are the product's.
+    /// The label's `sort`, 5, is no reference, whichever key the role gets.
+    fn labeled(label: i64, link: i64, milestone: i64, role: i64) -> Evidence {
+        let changes = vec![
+            insert("labels", json!({"id": label, "repo_id": 1, "name": "urgent", "sort": 5})),
+            insert("issue_labels", json!({"id": link, "issue_id": 3, "label_id": label})),
+            insert("milestones", json!({"id": milestone, "repo_id": 1, "title": "Q4"})),
+            update(
+                "issues",
+                json!({"id": 3, "milestone_id": null}),
+                json!({"milestone_id": milestone}),
+            ),
+            insert("roles", json!({"id": role, "name": "auditor"})),
+            granted(9, role),
+        ];
+        evidence(changes, Vec::new())
+    }
+
+    #[tokio::test]
+    async fn keys_of_new_rows_are_left_to_match_by_content() {
+        let dir = new_dir();
+        let a = trial(&dir, PAY, &labeled(57, 900, 12, 5), Some("57")).await;
+        let b = trial(&dir, PAY, &labeled(57, 900, 12, 5), Some("#57")).await;
+        let text = contract(&[&a, &b]).await;
+        assert_eq!(
+            spec_lines(&text),
+            [
+                "checks:",
+                "  - name: labels_inserted",
+                "    sql: |-",
+                "      SELECT count(*) >= 1 FROM after.\"labels\" WHERE _op = 'insert' \
+                 AND name = 'urgent' AND repo_id = 1 AND sort = 5",
+                "  - name: issue_labels_inserted",
+                "    sql: |-",
+                "      SELECT count(*) >= 1 FROM after.\"issue_labels\" WHERE _op = 'insert' \
+                 AND issue_id = 3",
+                "  - name: milestones_inserted",
+                "    sql: |-",
+                "      SELECT count(*) >= 1 FROM after.\"milestones\" WHERE _op = 'insert' \
+                 AND repo_id = 1 AND title = 'Q4'",
+                "  - name: roles_inserted",
+                "    sql: |-",
+                "      SELECT count(*) >= 1 FROM after.\"roles\" WHERE _op = 'insert' \
+                 AND name = 'auditor'",
+                "  - name: user_roles_inserted",
+                "    sql: |-",
+                "      SELECT count(*) >= 1 FROM after.\"user_roles\" WHERE _op = 'insert' \
+                 AND \"on\" = 1 AND user_id = 9",
+                "allow:",
+                "  - {table: labels, op: insert, where: \"repo_id = 1 AND sort = 5\"}",
+                "  - {table: issue_labels, op: insert, where: \"issue_id = 3\"}",
+                "  - {table: milestones, op: insert, where: \"repo_id = 1\"}",
+                "  - {table: issues, op: update, columns: [milestone_id], where: \"id = 3\"}",
+                "  - {table: roles, op: insert}",
+                "  - {table: user_roles, op: insert, where: \"\\\"on\\\" = 1 AND user_id = 9\"}",
+            ]
+        );
+        let rule = "which the product assigns: match that row by its content (authoring rule 4)";
+        for (column, table) in [
+            ("answer.value", "labels"),
+            ("issue_labels.label_id", "labels"),
+            ("issues.milestone_id", "milestones"),
+            ("user_roles.role_id", "roles"),
+        ] {
+            let note = format!("\n# {column} is the key of a new {table} row, {rule}\n");
+            assert!(text.contains(&note), "{note}{text}");
+        }
+        let agent = trial(&dir, PAY, &labeled(58, 901, 13, 6), Some("58")).await;
+        assert_eq!(graded(&text, &agent).await, scored(1.0, 0), "other keys, the same work");
+        let mut changes = labeled(58, 901, 13, 6).changes;
+        changes[5] = granted(10, 6);
+        let other = trial(&dir, PAY, &evidence(changes, Vec::new()), Some("58")).await;
+        assert_eq!(graded(&text, &other).await, scored(0.0, 1), "a role granted to another user");
+    }
+
+    #[tokio::test]
+    async fn dates_and_times_stay_out_of_allow_entries_and_are_named() {
+        let dir = new_dir();
+        let task = json!({"id": 1, "deal_id": 1100, "due": "2026-11-20", "done": false,
+                          "remind_s": 1_795_000_000, "remind_ms": 1_795_000_000_000_i64});
+        let close = update("deals", json!({"id": 1100, "close_on": null}), json!({"close_on": 7}));
+        let mut rate = delete("rates", json!({"day": "2026-11-17", "rate": 1.08}));
+        rate.pk = object(json!({"day": "2026-11-17"}));
+        let changes = vec![insert("tasks", task), close, rate];
+        let a = trial(&dir, PAY, &evidence(changes, Vec::new()), Some("2026-11-20")).await;
+        let text = contract(&[&a]).await;
+        let lines = spec_lines(&text);
+        let allow = "  - {table: tasks, op: insert, where: \"deal_id = 1100 AND done = 0\"}";
+        assert!(lines.contains(&allow), "{text}");
+        let check = "      SELECT count(*) >= 1 FROM after.\"tasks\" WHERE _op = 'insert' \
+                     AND deal_id = 1100 AND done = 0 AND due = '2026-11-20' \
+                     AND remind_ms = 1795000000000 AND remind_s = 1795000000";
+        assert!(lines.contains(&check), "{text}");
+        let times = "\n# dates and times compared as constants, which may not hold on another day \
+                     (authoring rule 5): answer.value, rates.day, tasks.due, tasks.remind_ms, \
+                     tasks.remind_s\n";
+        assert!(text.ends_with(times), "{text}");
+    }
+
+    #[test]
+    fn dates_and_unix_times_from_2000_to_2100_look_like_times() {
+        let times = [
+            json!("2026-11-17"),
+            json!("2026-11-17T10:00:00+00:00"),
+            json!("2026-11-17T10:00:00"),
+            json!(946_684_800),
+            json!(4_102_444_799_i64),
+            json!(946_684_800_000_i64),
+            json!(4_102_444_799_999_i64),
+        ];
+        for value in times {
+            assert!(timelike(&value), "{value}");
+        }
+        let others = [
+            json!("2026-11-17 10:00"),
+            json!("2026-11-1"),
+            json!("2026-11-1x"),
+            json!("2026/11/17"),
+            json!("x026-11-17"),
+            json!("20261117"),
+            json!(946_684_799),
+            json!(4_102_444_800_i64),
+            json!(946_684_799_999_i64),
+            json!(4_102_444_800_000_i64),
+            json!(1.8e9),
+            json!(true),
+            json!(null),
+        ];
+        for value in others {
+            assert!(!timelike(&value), "{value}");
+        }
+    }
+
+    #[tokio::test]
+    async fn no_draft_holds_three_quotes_in_a_row_so_it_pastes_into_task_toml() {
+        let dir = new_dir();
+        let note = insert("notes", json!({"id": 1, "deal_id": 1100, "text": "Renamed 'Q4 plan'"}));
+        let mut setting = update("settings", json!({"name": "a''", "on": 0}), json!({"on": 1}));
+        setting.pk = object(json!({"name": "a''"}));
+        let b = evidence(vec![note.clone(), setting], Vec::new());
+        let a = Evidence { tables: b.tables.clone(), ..evidence(vec![note], Vec::new()) };
+        let a = trial(&dir, PAY, &a, Some("'''")).await;
+        let b = trial(&dir, PAY, &b, Some("'''")).await;
+        let text = contract(&[&a, &b]).await;
+        let lines = spec_lines(&text);
+        let check = "      SELECT count(*) >= 1 FROM after.\"notes\" WHERE _op = 'insert' \
+                     AND deal_id = 1100 \
+                     AND text = ('Renamed ' || char(39) || 'Q4 plan' || char(39))";
+        assert!(lines.contains(&check), "{text}");
+        assert!(text.contains("\n# seen in 1 of 2 runs: settings update {\"name\":\"a'\\'\"}\n"));
+        assert!(!text.contains("'''"), "{text}");
+        let task = format!("[verifier.env]\nMIROIR_SPEC = '''\n{text}'''\n");
+        let task: toml::Table = toml::from_str(&task).unwrap_or_else(|e| panic!("{e}\n{task}"));
+        assert_eq!(task["verifier"]["env"]["MIROIR_SPEC"].as_str(), Some(text.as_str()));
+    }
+
+    #[tokio::test]
+    async fn only_whole_runs_of_the_reference_solution_are_drafted_from() {
+        let dir = new_dir();
+        let run = paid("2026-11-17T10:00:00+00:00");
+        let refusal = |trial: &Path, problem: &str| {
+            format!(
+                "{} is not a whole run of the reference solution: {problem}. Draft from the \
+                 trials of the oracle agent without SOLUTION, or pass the trial's evidence.db to \
+                 draft from it anyway",
+                trial.display()
+            )
+        };
+        let cases: [(Edit, &str); 5] = [
+            (|result| result["config"]["agent"]["name"] = json!("nop"), "its agent is nop"),
+            (
+                |result| result["config"]["agent"] = json!({"name": null, "import_path": "my:Ag"}),
+                "its agent is my:Ag",
+            ),
+            (|result| result["config"] = json!({}), "it names no agent"),
+            (
+                |result| result["config"]["agent"]["env"] = json!({"SOLUTION": "2"}),
+                "it runs probe 2 (SOLUTION=2)",
+            ),
+            (
+                |result| result["exception_info"] = json!({"exception_type": "AgentTimeoutError"}),
+                "the trial failed with AgentTimeoutError",
+            ),
+        ];
+        for (edit, problem) in cases {
+            let other = trial(&dir, PAY, &run, None).await;
+            rewrite(&other, edit);
+            assert_eq!(refused(&[&other]), refusal(&other, problem));
+            contract(&[&other.join(EVIDENCE)]).await;
+        }
+        let failed = trial(&dir, PAY, &run, None).await;
+        std::fs::create_dir_all(failed.join("agent")).unwrap();
+        std::fs::write(failed.join("agent/exit-code.txt"), "1\n").unwrap();
+        let problem = "the solution exited with 1 (agent/exit-code.txt)";
+        assert_eq!(refused(&[&failed]), refusal(&failed, problem));
+        std::fs::write(failed.join("agent/exit-code.txt"), "0").unwrap();
+        contract(&[&failed]).await;
+        let unreadable = trial(&dir, PAY, &run, None).await;
+        std::fs::create_dir_all(unreadable.join("agent/exit-code.txt")).unwrap();
+        let error = refused(&[&unreadable]);
+        let file = unreadable.join("agent/exit-code.txt");
+        assert!(error.starts_with(&format!("cannot read {}: ", file.display())), "{error}");
+        let voided = trial(&dir, PAY, &run, None).await;
+        rewrite(&voided, |result| {
+            result["exception_info"] = json!({"exception_type": "RewardFileNotFoundError"});
+            result["config"]["agent"]["env"] = json!({"SOLUTION": ""});
+        });
+        contract(&[&voided]).await;
+    }
+
+    #[tokio::test]
+    async fn a_run_given_twice_is_refused() {
+        let dir = new_dir();
+        let run = paid("2026-11-17T10:00:00+00:00");
+        let (a, b) = (trial(&dir, PAY, &run, None).await, trial(&dir, PAY, &run, None).await);
+        let twice = |first: &Path, second: &Path| {
+            let (first, second) = (first.display(), second.display());
+            format!("{first} and {second} are the same run: draft from different trials")
+        };
+        assert_eq!(refused(&[&a, &b, &a]), twice(&a, &a));
+        let evidence = a.join(EVIDENCE);
+        assert_eq!(refused(&[&evidence, &b, &a]), twice(&evidence, &a));
+        let spelled = dir.join(".").join(a.file_name().unwrap());
+        assert_eq!(refused(&[&a, &spelled]), twice(&a, &spelled));
     }
 
     #[tokio::test]
@@ -1541,10 +2123,27 @@ mod tests {
     #[tokio::test]
     async fn a_draft_past_the_spec_limit_is_refused() {
         let dir = new_dir();
-        let long = "x".repeat(spec::MAX_BYTES);
-        let a = trial(&dir, PAY, &evidence(Vec::new(), Vec::new()), Some(&long)).await;
+        let note = |n: i64| insert("notes", json!({"id": n, "deal_id": 1100 + n, "text": "x"}));
+        let a = trial(&dir, PAY, &evidence((0..300).map(note).collect(), Vec::new()), None).await;
         let error = refused(&[&a]);
         assert!(error.starts_with("the draft is not a valid spec, so it is not printed: the spec"));
+    }
+
+    #[tokio::test]
+    async fn text_too_long_to_check_is_named_and_left_out() {
+        let dir = new_dir();
+        let row = json!({"id": 1, "deal_id": 1100, "title": "t".repeat(CHECKED_BYTES),
+                         "text": "x".repeat(CHECKED_BYTES + 1)});
+        let (note, long) = (evidence(vec![insert("notes", row)], Vec::new()), "y".repeat(70_000));
+        let a = trial(&dir, PAY, &note, Some(&long)).await;
+        let text = contract(&[&a]).await;
+        let check = format!(
+            "      SELECT count(*) >= 1 FROM after.\"notes\" WHERE _op = 'insert' \
+             AND deal_id = 1100 AND title = '{}'",
+            "t".repeat(CHECKED_BYTES)
+        );
+        assert!(spec_lines(&text).contains(&check.as_str()), "{text}");
+        assert!(text.ends_with("\n# not checked, over 256 bytes: answer.value, notes.text\n"));
     }
 
     #[tokio::test]
@@ -1647,6 +2246,9 @@ mod tests {
             any::<i64>().prop_map(Value::from),
             any::<bool>().prop_map(Value::from),
             "[^\u{0}]{0,12}".prop_map(Value::from),
+            "['a ]{0,6}".prop_map(Value::from),
+            "20[0-9]{2}-[01][0-9]-[0-3][0-9](T[0-2][0-9]:00:00)?".prop_map(Value::from),
+            UNIX_SECONDS.prop_map(Value::from),
             Just(Value::Null),
             any::<f64>().prop_filter("finite", |f| f.is_finite()).prop_map(Value::from),
         ];
@@ -1659,34 +2261,37 @@ mod tests {
         })
     }
 
+    /// A table or column name. A name with three `'` in a row, which no spec pasted into a TOML
+    /// literal string can hold, is left out: values never need them, but names have no escape.
+    fn table_name() -> impl Strategy<Value = String> {
+        "[!-~é][ -~é]{0,5}".prop_filter("three quotes", |name| !name.contains("'''"))
+    }
+
     fn shapes() -> impl Strategy<Value = Vec<Shape>> {
-        let columns = collection::btree_set("[!-~é][ -~é]{0,5}", 1..4)
+        let columns = collection::btree_set(table_name(), 1..4)
             .prop_filter("the grader's own columns and the key", |columns| {
                 !columns.iter().any(|c| ["_op", "_change", "id"].contains(&c.as_str()))
             });
-        collection::btree_map("[!-~é][ -~é]{0,5}", (any::<bool>(), columns), 1..3).prop_map(
-            |tables| {
-                let shape = |(name, (keyed, columns)): (String, (bool, BTreeSet<String>))| Shape {
-                    name,
-                    keyed,
-                    columns: columns.into_iter().collect(),
-                };
-                tables.into_iter().map(shape).collect()
-            },
-        )
+        collection::btree_map(table_name(), (any::<bool>(), columns), 1..3).prop_map(|tables| {
+            let shape = |(name, (keyed, columns)): (String, (bool, BTreeSet<String>))| Shape {
+                name,
+                keyed,
+                columns: columns.into_iter().collect(),
+            };
+            tables.into_iter().map(shape).collect()
+        })
     }
 
-    fn steps(tables: usize) -> impl Strategy<Value = Vec<Step>> {
+    fn step(tables: usize) -> impl Strategy<Value = Step> {
         let values = || collection::vec(value(), 3);
         let step = (0..tables, 0..3_u8, values(), values(), collection::vec(any::<bool>(), 3));
-        let step = step.prop_map(|(table, op, values, others, volatile)| Step {
+        step.prop_map(|(table, op, values, others, volatile)| Step {
             table,
             op,
             values,
             others,
             volatile,
-        });
-        collection::vec(step, 1..5)
+        })
     }
 
     /// The evidence of one run of the random contract test. A keyless table gets no updates,
@@ -1725,21 +2330,25 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
         /// The contract (B1) on random evidence: two runs that differ in assigned ids and
-        /// volatile values, with tricky names, values, effects and answers.
+        /// volatile values, the second with a change of its own when `extra` is set, with tricky
+        /// names, values, effects and answers. No draft holds three `'` in a row.
         #[test]
         fn every_draft_parses_and_its_runs_score_one_without_harm(
-            (shapes, steps) in shapes().prop_flat_map(|shapes| {
-                let steps = steps(shapes.len());
-                (Just(shapes), steps)
+            (shapes, steps, extra) in shapes().prop_flat_map(|shapes| {
+                let steps = collection::vec(step(shapes.len()), 1..5);
+                (Just(shapes.clone()), steps, option::of(step(shapes.len())))
             }),
-            answer in option::of("[^\u{0}]{0,16}"),
+            answer in option::of(prop_oneof!["[^\u{0}]{0,16}", "['1 ,#]{0,6}"]),
             sent in option::of(("[^\u{0}]{0,12}", "[^\u{0}]{0,12}", any::<bool>())),
         ) {
             let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
             runtime.block_on(async {
                 let dir = new_dir();
-                let mut first = random_run(&shapes, &steps, false);
-                let mut second = random_run(&shapes, &steps, true);
+                let more: Vec<Step> = steps.iter().chain(&extra).cloned().collect();
+                let mut second = random_run(&shapes, &more, true);
+                // One world: both runs capture the same tables.
+                let tables = second.tables.clone();
+                let mut first = Evidence { tables, ..random_run(&shapes, &steps, false) };
                 if let Some((path, subject, varies)) = &sent {
                     let other = if *varies { format!("{subject}!") } else { subject.clone() };
                     let path = format!("/{path}");
@@ -1751,6 +2360,7 @@ mod tests {
                 let (result, text) = drafted(&[&a, &b]);
                 if result.unwrap() {
                     spec::parse(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+                    assert!(!text.contains("'''"), "{text}");
                     assert_eq!(graded(&text, &a).await, scored(1.0, 0), "{text}");
                     assert_eq!(graded(&text, &b).await, scored(1.0, 0), "{text}");
                 } else {
