@@ -495,6 +495,26 @@ mod tests {
         assert_eq!(changes, [deleted, inserted], "ordered by table, then key");
     }
 
+    /// A check compares a value with the literal the database holds, so every double must read
+    /// back exactly. Without `serde_json`'s `float_roundtrip`, about a third of these miss by a bit.
+    #[test]
+    fn row_images_keep_every_double_exactly() {
+        let tables = [table("prices", &["id"], &["id", "amount"])];
+        let doubles = (0..2000_u64).map(|n| {
+            f64::from_bits(
+                0x3FF0_0000_0000_0000 + n.wrapping_mul(0x9E37_79B9_7F4A_7C15) % (1 << 52),
+            )
+        });
+        for (id, amount) in doubles.enumerate() {
+            let text = format!(r#"{{"id": {id}, "amount": {amount:?}}}"#);
+            let row =
+                LogRow { tbl: "prices".into(), op: "insert".into(), old: None, new: Some(text) };
+            let changes = fold(&[row], &tables, &Ignore::default()).unwrap();
+            let after = changes[0].after.as_ref().unwrap();
+            assert_eq!(after["amount"].as_f64(), Some(amount), "{amount:?}");
+        }
+    }
+
     #[test]
     fn an_update_of_the_key_moves_the_row() {
         let tables = [table("deals", &["id"], &["id", "v"])];
