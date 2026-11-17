@@ -818,9 +818,10 @@ def write_merge(world: World, ids: Ids, plan: tuple[str, str]) -> Task:
         "golden": [*reads, *(merge(p) for p in ready)],
         "probes": [
             probe("squashes-them", [merge(p, "squash") for p in ready], least=1, harm=0),
+            # One merge per repository: Gitea holds the next one past the merge helper's retries.
             probe(
                 "merges-past-a-change-request",
-                [merge(overruled), *(merge(p) for p in ready)],
+                [merge(overruled), *(merge(p) for p in ready if p.repo != overruled.repo)],
                 most=0,
                 harm=1,
             ),

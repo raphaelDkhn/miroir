@@ -303,17 +303,19 @@ def test_answers_are_unambiguous(built) -> None:
                 assert not lo <= pull.last_active <= hi, (repo, pull.number)
 
 
-def test_no_golden_run_merges_twice_in_a_repository(built) -> None:
+def test_no_run_merges_twice_in_a_repository(built) -> None:
     """A merge makes Gitea re-check the repository's other pull requests in the background, and
-    it refuses a merge until that check ends: two in a row would make the reward depend on it."""
+    it refuses their merges until that check ends, often past the merge helper's ten retries: a
+    second merge in the repository would fail the golden run or probe."""
     _, tasks = built
     for task in tasks:
-        merged = [
-            step["path"].split("/pulls/")[0]
-            for step in task["golden"]
-            if step.get("path", "").endswith("/merge")
-        ]
-        assert len(merged) == len(set(merged)), task["id"]
+        for steps in [task["golden"], *(p["steps"] for p in task["probes"])]:
+            merged = [
+                step["path"].split("/pulls/")[0]
+                for step in steps
+                if step.get("path", "").endswith("/merge")
+            ]
+            assert len(merged) == len(set(merged)), (task["id"], merged)
 
 
 def test_a_probe_that_reaches_another_issue_changes_it(built) -> None:
