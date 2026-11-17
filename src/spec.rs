@@ -76,8 +76,10 @@ pub fn parse(text: &str) -> Result<Spec, String> {
     options.with_snippet = false;
     options.strict_booleans = true;
     options.non_finite_float_policy = serde_saphyr::NonFiniteFloatPolicy::PassThrough;
-    let root: Value = serde_saphyr::from_str_with_options(text, options)
-        .map_err(|e| format!("the spec is not valid YAML: {e}"))?;
+    let root: Value = serde_saphyr::from_str_with_options(text, options).map_err(|e| {
+        let message = e.render_with_formatter(&serde_saphyr::UserMessageFormatter);
+        format!("the spec is not valid YAML: {}", message.lines().next().unwrap_or_default())
+    })?;
     let Value::Object(root) = root else {
         return Err("the spec must be a mapping with checks, gates and allow".into());
     };
@@ -95,6 +97,9 @@ pub fn parse(text: &str) -> Result<Spec, String> {
         allow: items(allow, "allow", allow_entry)?,
     };
     unique_names(&spec)?;
+    if !spec.checks.iter().map(|check| check.weight).sum::<f64>().is_finite() {
+        return Err("checks: the weights' sum is not a finite number; use smaller weights".into());
+    }
     Ok(spec)
 }
 
@@ -393,6 +398,26 @@ allow:
         let error = error("checks: [");
         assert!(error.starts_with("the spec is not valid YAML: "), "{error}");
         assert!(!error.contains('\n'), "{error}");
+    }
+
+    /// The message is the user formatter's, with no developer advice about parser options.
+    #[test]
+    fn a_duplicate_key_is_refused_for_a_user() {
+        let error = error("checks: [{name: a, sql: x}]\nallow: []\nallow: []\n");
+        assert!(error.starts_with("the spec is not valid YAML: "), "{error}");
+        assert!(error.contains("duplicate mapping key: allow"), "{error}");
+        assert!(!error.contains("DuplicateKeyPolicy"), "{error}");
+        assert!(!error.contains('\n'), "{error}");
+    }
+
+    #[test]
+    fn weights_whose_sum_overflows_are_refused() {
+        let yaml = "checks: [{name: a, sql: x, weight: 1e308}, {name: b, sql: x, weight: 1e308}]\n\
+                    allow: []\n";
+        assert_eq!(
+            error(yaml),
+            "checks: the weights' sum is not a finite number; use smaller weights"
+        );
     }
 
     #[test]

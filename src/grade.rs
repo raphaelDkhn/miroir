@@ -57,16 +57,17 @@ pub fn answer(text: &str) -> Answer {
 }
 
 /// The paste-ready `allow` line for a change (§4.5), such as `- {table: invoices, op: update,
-/// columns: [paid_at, status], where: "id = 4020"}`: its `where` is the primary-key equality,
-/// and a keyless table (an empty `pk`) gets none. The one renderer of these lines, shared by
-/// grade's out-of-scope report and `miroir draft`.
+/// columns: [paid_at, status], where: "id = 4020"}`: its `where` is the conjunction of
+/// `column = value` over `key`, and an empty `key` gets none. Grade passes a change's primary
+/// key; `miroir draft` passes an insert's stable integer and boolean columns. The one renderer
+/// of these lines, shared by grade's out-of-scope report and `miroir draft`.
 pub fn allow_line(
     table: &str,
     op: Op,
     columns: Option<&[String]>,
-    pk: &Map<String, Value>,
+    key: &Map<String, Value>,
 ) -> String {
-    let _ = (table, op, columns, pk);
+    let _ = (table, op, columns, key);
     String::new()
 }
 

@@ -209,12 +209,13 @@ async fn fill(path: &Path, evidence: &Evidence) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Open an evidence file to read it: read-only, with statement logging off, once its
-/// `meta.format` is [`FORMAT`]. A missing file is an error and is never created; another
-/// format is an error naming both formats and the version that wrote the file.
+/// Open an evidence file to read it, with statement logging off, once its `meta.format` is
+/// [`FORMAT`]. A missing file is an error and is never created; another format is an error
+/// naming both formats and the version that wrote the file. The connection is writable, since
+/// SQLite opens attached databases with the main file's flags and the grader builds `before` and
+/// `after` in attached memory databases: open a copy, never the artifact itself.
 pub async fn open(path: &Path) -> anyhow::Result<SqliteConnection> {
-    let options =
-        SqliteConnectOptions::new().filename(path).read_only(true).disable_statement_logging();
+    let options = SqliteConnectOptions::new().filename(path).disable_statement_logging();
     let mut conn = SqliteConnection::connect_with(&options)
         .await
         .with_context(|| format!("cannot open {}", path.display()))?;
@@ -672,5 +673,21 @@ mod tests {
         let error = open(&path).await.unwrap_err().to_string();
         assert!(error.starts_with("cannot open"), "{error}");
         assert!(!path.exists());
+    }
+
+    /// The grader builds `before` and `after` in attached memory databases on this connection.
+    #[tokio::test]
+    async fn open_lets_attached_memory_databases_be_written() {
+        let (path, mut conn) = written("attach", &evidence(Vec::new())).await;
+        sqlx::raw_sql(
+            "ATTACH ':memory:' AS after; CREATE TABLE after.\"t\" (\"a\"); \
+             INSERT INTO after.\"t\" VALUES (1)",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        let count: Vec<(i64,)> = rows(&mut conn, "SELECT count(*) FROM after.t").await;
+        assert_eq!(count, vec![(1,)]);
+        std::fs::remove_file(path).unwrap();
     }
 }
