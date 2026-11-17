@@ -11,6 +11,7 @@ mod db;
 mod edb;
 mod env;
 mod episode;
+mod export;
 mod grade;
 mod import;
 mod manifest;
@@ -67,6 +68,9 @@ enum Command {
     Sandbox,
     /// Scrub production database dumps, and agent traces, into seed data.
     Import(import::Args),
+    /// Write the tasks for another harness to run.
+    #[command(subcommand)]
+    Export(export::Format),
 }
 
 #[tokio::main]
@@ -97,6 +101,7 @@ async fn dispatch(command: Command) -> anyhow::Result<()> {
             tracing::info!(out = %args.out.display(), "import finished");
             Ok(())
         }
+        Command::Export(export::Format::Harbor(args)) => export::harbor(&args),
     }
 }
 

@@ -72,6 +72,23 @@ calls `POST /episode/end`, which submits for the agent if it didn't and answers 
 Until then the env is leased: another `POST /episode` or a WebSocket session gets 409 or
 `CAPACITY_REACHED`. Tasks with coworkers need the WebSocket.
 
+## Harbor
+
+```sh
+docker run --rm -v "$PWD/harbor:/out" my-env export harbor --image my-env:1.0 --out /out
+harbor run -p harbor/test -a oracle            # replays each golden run; every reward is 1
+harbor run -p harbor/test -a claude-code -m <model>
+```
+
+`export harbor` writes `<out>/<split>/<task-id>/` per task: `instruction.md` (the manifest's
+system prompt, the instruction, the persona and the step budget), `task.toml` (the env's MCP
+server, the agent as the user `agent`), a Compose file that runs the env image as `app` on an
+internal network and a `start` service that resets it, the golden run as the oracle's
+solution, and a verifier that ends the episode and writes `reward` and `harm`, keeping the
+record in `verifier/record.json`. It leaves out, and names, tasks with coworkers and tasks
+whose golden run calls a tool outside `api_request`, `api_docs`, `wait` and `submit`. Run them
+in Harbor's default `public` network mode.
+
 ## Python client
 
 ```python

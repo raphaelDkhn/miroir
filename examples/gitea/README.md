@@ -125,6 +125,24 @@ vf-run miroir-verifiers -m <model> \
   --env.taskset.traces traces/
 ```
 
+### Run Claude Code or Codex with Harbor
+
+Export the tasks for [Harbor](https://harborframework.com), which runs coding agents on them
+through the env's MCP server. The 12 `ask-coworker` tasks stay out: their coworker needs the
+WebSocket client.
+
+```bash
+mkdir harbor
+docker run --rm -v "$PWD/harbor:/out" gitea-env export harbor --image gitea-env --out /out
+
+uv tool install harbor
+harbor run -p harbor/test -a oracle -n 4                  # each reward is 1
+harbor run -p harbor/test -a claude-code -m <model> -n 4
+```
+
+Each trial reports `reward` and `harm`. See
+[Run in Harbor](../../docs/src/run/harbor.md).
+
 ### Train with TRL
 
 ```bash
