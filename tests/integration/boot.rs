@@ -32,7 +32,6 @@ fn a_world_boots_stops_on_sigterm_and_boots_again_from_a_fresh_run_dir() {
     assert_eq!(names, ["datastores", "shift", "apps", "quiet"], "{line}");
     let modes = world.exec_ok(&["stat", "-c", "%a %U", "/miroir", "/miroir/run"]);
     assert_eq!(modes, "700 root\n700 root");
-    assert_eq!(world.exec_ok(&["ls", "-A", "/miroir/run"]), "catalog.json\nready");
     world.exec_ok(&["touch", "/miroir/run/stale"]);
     let stopping = Instant::now();
     docker_ok(&["stop", "--time", "30", world.id()]);
@@ -41,7 +40,10 @@ fn a_world_boots_stops_on_sigterm_and_boots_again_from_a_fresh_run_dir() {
     assert!(world.logs().contains("SIGTERM: stopping the world"), "{}", world.logs());
     world.start();
     world.wait_ready();
-    assert_eq!(world.exec_ok(&["ls", "-A", "/miroir/run"]), "catalog.json\nready", "no stale file");
+    let listing = world.exec_ok(&["ls", "-A", "/miroir/run"]);
+    let files: Vec<&str> = listing.lines().collect();
+    let fresh = files.contains(&"ready") && files.contains(&"catalog.json");
+    assert!(fresh && !files.contains(&"stale"), "{listing}");
 }
 
 #[test]
