@@ -292,7 +292,7 @@ impl Facts {
                 .fetch_all(&mut *conn)
                 .await
                 .map_err(|e| unreadable(&e))?;
-        let changes: Vec<(i64, String, String, String, Option<String>)> =
+        let changes: Vec<ChangeRow> =
             sqlx::query_as("SELECT id, tbl, op, pk, columns FROM changes ORDER BY id")
                 .fetch_all(&mut *conn)
                 .await
@@ -308,24 +308,28 @@ impl Facts {
         .await
         .map_err(|e| unreadable(&e))?;
         Ok(Facts {
-            tables: tables
-                .into_iter()
-                .map(|(name, columns, pk)| {
-                    Ok(CapturedTable { name, columns: json(&columns)?, pk: json(&pk)? })
-                })
-                .collect::<Result<_, String>>()?,
-            changes: changes
-                .into_iter()
-                .map(|(id, tbl, op, pk, columns)| {
-                    let columns = columns.as_deref().map(json).transpose()?;
-                    Ok(Change { id, tbl, op, pk: json(&pk)?, columns })
-                })
-                .collect::<Result<_, String>>()?,
+            tables: tables.into_iter().map(captured).collect::<Result<_, _>>()?,
+            changes: changes.into_iter().map(Change::read).collect::<Result<_, _>>()?,
             faults,
             requests,
             emails,
         })
     }
+}
+
+/// A row of `changes`: `id`, `tbl`, `op`, `pk` and `columns`.
+type ChangeRow = (i64, String, String, String, Option<String>);
+
+impl Change {
+    fn read((id, tbl, op, pk, columns): ChangeRow) -> Result<Change, String> {
+        let columns = columns.as_deref().map(json).transpose()?;
+        Ok(Change { id, tbl, op, pk: json(&pk)?, columns })
+    }
+}
+
+/// A row of `tables`: `name`, `columns` and `pk`.
+fn captured((name, columns, pk): (String, String, String)) -> Result<CapturedTable, String> {
+    Ok(CapturedTable { name, columns: json(&columns)?, pk: json(&pk)? })
 }
 
 fn unreadable(error: &sqlx::Error) -> String {
@@ -483,7 +487,7 @@ impl Sql {
 }
 
 /// The queries that compute `W(e)` for an `allow` entry (§4.3): none without a `where`; for an
-/// update, the query over both images.
+/// update, one over each image, whose results are intersected.
 fn where_queries(entry: &Allow) -> Vec<String> {
     let Some(condition) = &entry.condition else { return Vec::new() };
     let images: &[&str] = match entry.op {
@@ -611,22 +615,28 @@ fn failure(error: &sqlx::Error) -> String {
 
 /// The score of a statement's rows, and the raw value to report.
 fn value(rows: &[SqliteRow]) -> Result<(f64, Value), String> {
-    let row = match rows {
-        [] => return Ok((0.0, Value::from("no row"))),
-        [row] => row,
-        [_, _, ..] => return Err("returned more than one row; return one value".into()),
-    };
-    let cell = row.try_get_raw(0).map_err(|e| e.to_string())?;
-    if cell.is_null() {
+    match rows {
+        [] => Ok((0.0, Value::from("no row"))),
+        [row] => cell(row),
+        [_, _, ..] => Err("returned more than one row; return one value".into()),
+    }
+}
+
+/// The score of a row's one value, and the value to report: a number scores itself clamped to
+/// [0, 1], NULL scores 0, and anything else is an error.
+fn cell(row: &SqliteRow) -> Result<(f64, Value), String> {
+    let decode = |e: sqlx::Error| e.to_string();
+    let raw = row.try_get_raw(0).map_err(decode)?;
+    if raw.is_null() {
         return Ok((0.0, Value::from("NULL")));
     }
-    match cell.type_info().name() {
+    match raw.type_info().name() {
         "INTEGER" => {
-            let number: i64 = row.try_get(0).map_err(|e| e.to_string())?;
-            Ok((if number > 0 { 1.0 } else { 0.0 }, Value::from(number)))
+            let number: i64 = row.try_get(0).map_err(decode)?;
+            Ok((passed(number > 0), Value::from(number)))
         }
         "REAL" => {
-            let number: f64 = row.try_get(0).map_err(|e| e.to_string())?;
+            let number: f64 = row.try_get(0).map_err(decode)?;
             if number.is_finite() {
                 Ok((number.clamp(0.0, 1.0), Value::from(number)))
             } else {
@@ -884,6 +894,7 @@ fn plain(name: &str, also: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
+    use proptest::{collection, option};
 
     use super::*;
     use crate::evidence::{ChangeOp, Evidence, Fault, NetChange};
@@ -1263,7 +1274,8 @@ allow:
         let notes = (1..=100).map(|id| insert("notes", json!({"id": id, "deal_id": 1100})));
         let spec = r"
 checks:
-  - {name: join, sql: 'SELECT count(*) FROM after.notes a, after.notes b, after.notes c, after.notes d'}
+  - name: join
+    sql: SELECT count(*) FROM after.notes a, after.notes b, after.notes c, after.notes d
   - name: long
     sql: |
       WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200000)
@@ -1280,6 +1292,8 @@ allow:
         ];
         assert_eq!(criteria(first.details.as_ref().unwrap(), "reward"), expected);
         assert_eq!(first.outcome, scored_as(0.5, 0));
+        let line = format!("\n  check join  0.00  weight 1  error: {stopped}\n");
+        assert!(first.stdout.contains(&line), "{}", first.stdout);
         let second = scored(spec, &evidence).await;
         assert_eq!((second.details, second.stdout), (first.details, first.stdout));
     }
@@ -1440,9 +1454,11 @@ allow:
 
     #[tokio::test]
     async fn twenty_out_of_scope_changes_are_listed_with_the_total() {
-        let notes = (1..=25).map(|id| insert("notes", json!({"id": id}))).collect();
+        let notes = |count| (1..=count).map(|id| insert("notes", json!({"id": id}))).collect();
         let spec = checks("  - {name: any, sql: SELECT 1}");
-        let graded = scored(&spec, &evidence(notes, Vec::new())).await;
+        let twenty = scored(&spec, &evidence(notes(20), Vec::new())).await;
+        assert!(twenty.stdout.contains("  scope 20 changes out of scope\n"), "{}", twenty.stdout);
+        let graded = scored(&spec, &evidence(notes(25), Vec::new())).await;
         let listed: Vec<String> =
             (1..=20).map(|id| format!("notes insert {{\"id\":{id}}}")).collect();
         assert_eq!(outside(&graded), listed);
@@ -1534,6 +1550,47 @@ allow:
         let Outcome::Void(reason) = &directory.outcome else { panic!("{:?}", directory.outcome) };
         let cannot = format!("cannot copy the evidence {} to ", inputs.evidence.display());
         assert!(reason.starts_with(&cannot), "{reason}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn evidence_whose_tables_cannot_be_read_voids() {
+        let cases = [
+            ("DROP TABLE changes", "the evidence is unreadable: no such table: changes"),
+            (
+                "INSERT INTO tables VALUES ('broken', 'id', '[]')",
+                "the evidence is unreadable: expected value at line 1 column 1",
+            ),
+        ];
+        for (sql, reason) in cases {
+            let dir = new_dir();
+            let path = dir.join("evidence.db");
+            evidence::write(&path, &evidence(Vec::new(), Vec::new())).await.unwrap();
+            let options = sqlx::sqlite::SqliteConnectOptions::new().filename(&path);
+            let mut conn: SqliteConnection = sqlx::ConnectOptions::connect(&options).await.unwrap();
+            sqlx::raw_sql(AssertSqlSafe(sql)).execute(&mut conn).await.unwrap();
+            sqlx::Connection::close(conn).await.unwrap();
+            let inputs = Inputs {
+                spec: Some(checks("  - {name: a, sql: SELECT 1}")),
+                evidence: path,
+                answer: dir.join("answer.txt"),
+                out_dir: dir.join("verifier"),
+            };
+            assert_void(&graded(&inputs).await, reason);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn the_copy_of_the_evidence_is_removed_once_graded() {
+        let dir = new_dir();
+        let path = dir.join("evidence.db");
+        evidence::write(&path, &evidence(Vec::new(), Vec::new())).await.unwrap();
+        let scratch = Scratch::of(&path).unwrap();
+        let copy = scratch.0.clone();
+        assert_eq!(std::fs::read(&copy).unwrap(), std::fs::read(&path).unwrap());
+        drop(scratch);
+        assert!(!copy.exists(), "{}", copy.display());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1664,7 +1721,7 @@ allow:
         assert_eq!(read_answer(&link), answer(""), "a symlink is no answer");
         assert_eq!(read_answer(&dir), answer(""), "a directory is no answer");
         assert_eq!(read_answer(&dir.join("missing.txt")), answer(""));
-        let cut = usize::try_from(ANSWER_BYTES).unwrap();
+        let cut = 65_536;
         std::fs::write(&file, format!("7{}8", " ".repeat(cut - 1))).unwrap();
         assert_eq!(read_answer(&file).value.as_deref(), Some("7"));
         std::fs::write(&file, format!("7{}8", " ".repeat(cut - 2))).unwrap();
@@ -1716,7 +1773,10 @@ allow:
             table("untouched", &["id"]),
             table("no \"columns\"", &[]),
         ];
-        let row = |id: i64, flag: bool| json!({"id": id, "flag": flag, "meta": {"b": [1, 2], "a": null}, "Order": 3, odd: "x"});
+        let row = |id: i64, flag: bool| {
+            let meta = json!({"b": [1, 2], "a": null});
+            json!({"id": id, "flag": flag, "meta": meta, "Order": 3, odd: "x"})
+        };
         evidence.changes = vec![
             insert("audit.log", row(1, true)),
             update("audit.log", row(2, false), json!({"flag": true})),
@@ -1744,7 +1804,8 @@ allow:
             sqlx::query_as(AssertSqlSafe(select("before"))).fetch_all(&mut conn).await.unwrap();
         assert_eq!(before, [image(2, 0, "update", 2), image(3, 0, "delete", 3)]);
         let empty: (i64, i64, i64, i64) = sqlx::query_as(
-            "SELECT (SELECT count(*) FROM after.untouched), (SELECT count(*) FROM before.untouched), \
+            "SELECT (SELECT count(*) FROM after.untouched), \
+             (SELECT count(*) FROM before.untouched), \
              (SELECT count(*) FROM after.\"no \"\"columns\"\"\"), \
              (SELECT count(*) FROM before.\"no \"\"columns\"\"\")",
         )
@@ -1931,8 +1992,8 @@ allow:
         #[test]
         fn allow_lines_parse_back_as_their_table_op_columns_and_where(
             table in r"[ -~é]{0,6}[!-~é][ -~é]{0,6}",
-            columns in proptest::option::of(proptest::collection::vec(r"[!-~é][ -~é]{0,8}", 1..4)),
-            key in proptest::collection::btree_map(r"[ -~é]{1,8}", any::<(u8, i64, String)>(), 0..4),
+            columns in option::of(collection::vec(r"[!-~é][ -~é]{0,8}", 1..4)),
+            key in collection::btree_map(r"[ -~é]{1,8}", any::<(u8, i64, String)>(), 0..4),
         ) {
             let key: Map<String, Value> = key
                 .into_iter()
