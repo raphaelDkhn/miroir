@@ -18,6 +18,7 @@ for parallel rollouts, such as with a [pool](#pools).
 | `GET /health` | `{"status": "healthy", "leased": false}`, or 503 while the env can't serve |
 | `GET /ws` | the OpenEnv session |
 | `POST /mcp` | MCP over JSON-RPC |
+| `POST /episode`, `/episode/end` | start an episode without a WebSocket (a `reset` frame's `data`); end it, submitting if it still runs, and get its record |
 | `GET /metadata` | name, description, `version`, `miroir_version`, `manifest_hash`, `tasks_hash` |
 | `GET /schema`, `/openapi.json` | the frames' JSON schemas; these routes |
 | `GET /list_environments`, `/{name}/splits` | the env's name; the splits that have tasks |
@@ -30,6 +31,7 @@ A listed task has `id`, `split`, `world`, `instruction`, `persona` (`name`, `des
 | Variable | What |
 |---|---|
 | `MIROIR_TOKEN` | the bearer token every route but `/health` requires; unset, anyone can act |
+| `MIROIR_AGENT_TOKEN` | a second token that opens `/mcp` alone, for an agent that calls it itself; needs `MIROIR_TOKEN`, and must differ |
 | `MIROIR_PORT` | the port to serve on; 8000 by default |
 | `MIROIR_SANDBOX` | `http://HOST:PORT` of a sandbox, which enables `run_code` |
 | `MIROIR_LOG_BUDGET_MB` | change-log size past which an episode faults; 1024 by default |
@@ -60,9 +62,15 @@ Errors come back as `{"type": "error", "data": {"code", "message"}}`. A failed t
 `execution_error`, `transport_error` or `timeout`; the agent can go on.
 
 `POST /mcp` serves the same episode's tools over MCP (`initialize`, `ping`, `tools/list`,
-`tools/call`), while the WebSocket session still does the reset. Its query string takes
+`tools/call`), while the WebSocket session, or `POST /episode`, does the reset. Its query string takes
 `surface` (`api`: `api_request`, `api_docs`, `wait`, `submit`; `code`: `run_code` in place of
 `api_request`; `mcp`: the product's MCP tools, `wait` and `submit`), `episode_id` and `token`.
+
+A harness whose agent speaks MCP alone starts the episode with `POST /episode` (body: a
+`reset` frame's `data`), lets the agent work through `/mcp` with `MIROIR_AGENT_TOKEN`, then
+calls `POST /episode/end`, which submits for the agent if it didn't and answers the record.
+Until then the env is leased: another `POST /episode` or a WebSocket session gets 409 or
+`CAPACITY_REACHED`. Tasks with coworkers need the WebSocket.
 
 ## Python client
 

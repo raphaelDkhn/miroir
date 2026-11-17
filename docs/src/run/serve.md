@@ -18,6 +18,7 @@ with `CAPACITY_REACHED`. For parallel rollouts, run several containers, such as 
 | `GET /health` | `{"status": "healthy", "leased": false}`, or 503 while the env can't serve |
 | `GET /ws` | the OpenEnv session; see [Protocol](protocol.md) |
 | `POST /mcp` | MCP over JSON-RPC; see [Protocol](protocol.md#mcp) |
+| `POST /episode`, `POST /episode/end` | start and end an episode without a WebSocket; see [Protocol](protocol.md#episodes-over-http) |
 | `GET /metadata` | name, description, `version`, `miroir_version`, `manifest_hash`, `tasks_hash` |
 | `GET /schema` | JSON schemas of the frames |
 | `GET /openapi.json` | these routes |
@@ -37,14 +38,19 @@ and `coworkers` when the task has some.
 
 ## Settings
 
-Besides `MIROIR_TOKEN`, the env reads `MIROIR_PORT` (8000 by default), `MIROIR_SANDBOX` (a
-[sandbox](../features/sandbox.md) for `run_code`), `MIROIR_LOG_BUDGET_MB` and
-`MIROIR_ENV_VERSION`. See [Environment variables](../reference/env.md).
+Besides `MIROIR_TOKEN` and `MIROIR_AGENT_TOKEN`, the env reads `MIROIR_PORT` (8000 by
+default), `MIROIR_SANDBOX` (a [sandbox](../features/sandbox.md) for `run_code`),
+`MIROIR_LOG_BUDGET_MB` and `MIROIR_ENV_VERSION`. See
+[Environment variables](../reference/env.md).
 
 ## Security
 
 - Set `MIROIR_TOKEN`. Clients send it as `Authorization: Bearer <token>`; `/mcp` also takes
   `?token=`. The product's processes don't see it.
+- When an agent calls `/mcp` itself, as over [HTTP episodes](protocol.md#episodes-over-http),
+  give it `MIROIR_AGENT_TOKEN` instead: a second token that opens `/mcp` alone, so the agent
+  can't end its episode, start another or read the task listings. It needs `MIROIR_TOKEN`
+  set, and must differ from it.
 - Requests that carry an `Origin` header, as web pages send, are refused.
 - Publish the port on 127.0.0.1, and run the env on an internal network. Calls the product
   makes past the [sinks](../features/sinks.md) are neither recorded nor blocked.
