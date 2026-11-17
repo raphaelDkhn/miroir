@@ -1,28 +1,26 @@
+# `docker buildx bake` builds the grader, the agent's container and the acme-crm world;
+# `docker buildx bake gitea` builds the three Gitea worlds. Every image is loaded into Docker.
 group "default" {
-  targets = ["acme-crm-env", "mini-shop-env", "acme-apps-env", "miroir-sandbox"]
+  targets = ["miroir", "main", "acme-crm-env"]
 }
 
 target "miroir" {
   context = "."
   tags    = ["miroir:dev"]
+  output  = ["type=docker"]
 }
 
-target "miroir-sandbox" {
-  context  = "sandbox"
-  args     = { MIROIR_IMAGE = "miroir:dev" }
-  contexts = { "miroir:dev" = "target:miroir" }
-  tags     = ["miroir-sandbox"]
-  output   = ["type=docker"]
+target "main" {
+  context    = "."
+  dockerfile = "main.Dockerfile"
+  tags       = ["miroir-main:dev"]
+  output     = ["type=docker"]
 }
 
 target "acme-crm" {
   context = "fixtures/acme-crm"
   tags    = ["acme-crm:dev"]
-}
-
-target "mini-shop" {
-  context = "fixtures/mini-shop"
-  tags    = ["mini-shop:dev"]
+  output  = ["type=docker"]
 }
 
 target "acme-crm-env" {
@@ -30,33 +28,17 @@ target "acme-crm-env" {
   dockerfile = "Dockerfile.miroir"
   args       = { PRODUCT_IMAGE = "acme-crm:dev", MIROIR_IMAGE = "miroir:dev" }
   contexts   = { "acme-crm:dev" = "target:acme-crm", "miroir:dev" = "target:miroir" }
-  tags       = ["acme-crm-env"]
+  tags       = ["acme-crm-env:dev"]
   output     = ["type=docker"]
 }
 
-target "mini-shop-env" {
-  context    = "fixtures/mini-shop"
-  dockerfile = "Dockerfile.miroir"
-  args       = { PRODUCT_IMAGE = "mini-shop:dev", MIROIR_IMAGE = "miroir:dev" }
-  contexts   = { "mini-shop:dev" = "target:mini-shop", "miroir:dev" = "target:miroir" }
-  tags       = ["mini-shop-env"]
-  output     = ["type=docker"]
-}
-
-target "gitea-env" {
+target "gitea" {
+  name       = "gitea-${world}"
+  matrix     = { world = ["orbit", "ferry", "kestrel"] }
   context    = "examples/gitea"
   dockerfile = "Dockerfile.miroir"
-  args       = { MIROIR_IMAGE = "miroir:dev" }
+  args       = { MIROIR_IMAGE = "miroir:dev", WORLD = world }
   contexts   = { "miroir:dev" = "target:miroir" }
-  tags       = ["gitea-env"]
-  output     = ["type=docker"]
-}
-
-target "acme-apps-env" {
-  context    = "fixtures/acme-apps"
-  dockerfile = "../acme-crm/Dockerfile.miroir"
-  args       = { PRODUCT_IMAGE = "acme-crm:dev", MIROIR_IMAGE = "miroir:dev" }
-  contexts   = { "acme-crm:dev" = "target:acme-crm", "miroir:dev" = "target:miroir" }
-  tags       = ["acme-apps-env"]
+  tags       = ["gitea-env:${world}"]
   output     = ["type=docker"]
 }
