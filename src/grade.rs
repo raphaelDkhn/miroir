@@ -1561,6 +1561,15 @@ allow:
                 "INSERT INTO tables VALUES ('broken', 'id', '[]')",
                 "the evidence is unreadable: expected value at line 1 column 1",
             ),
+            (
+                "INSERT INTO changes VALUES (1, 'deals', 'delete', '{', '{}', NULL, NULL)",
+                "the evidence is unreadable: EOF while parsing an object at line 1 column 1",
+            ),
+            (
+                "INSERT INTO changes VALUES (1, 'deals', 'update', '{}', '{}', '{}', '[1]')",
+                "the evidence is unreadable: invalid type: integer `1`, expected a string at line \
+                 1 column 2",
+            ),
         ];
         for (sql, reason) in cases {
             let dir = new_dir();
@@ -1673,6 +1682,38 @@ allow:
         let Outcome::Void(reason) = graded(&blocked).await.outcome else { panic!("not void") };
         let cannot = format!("cannot write the reward to {}: ", blocked.out_dir.display());
         assert!(reason.starts_with(&cannot), "{reason}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A stdout that refuses every write.
+    struct Closed;
+
+    impl std::io::Write for Closed {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_closed_stdout_leaves_the_outcome_and_the_reward_as_they_are() {
+        let dir = new_dir();
+        let inputs = Inputs {
+            spec: Some(checks("  - {name: a, sql: SELECT 1}")),
+            evidence: dir.join("evidence.db"),
+            answer: dir.join("answer.txt"),
+            out_dir: dir.join("verifier"),
+        };
+        evidence::write(&inputs.evidence, &evidence(Vec::new(), Vec::new())).await.unwrap();
+        assert_eq!(grade(&inputs, &mut Closed).await, scored_as(1.0, 0));
+        let reward = std::fs::read_to_string(inputs.out_dir.join("reward.json")).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&reward).unwrap(),
+            json!({"reward": 1.0, "harm": 0})
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
