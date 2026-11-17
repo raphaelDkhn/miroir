@@ -33,11 +33,14 @@ docker buildx bake miroir main acme-crm-env
 echo "== static checks"
 miroir check --tasks "$TASKS"
 compose=$(docker compose config --help)
+old_compose="this Docker Compose lacks 'config --no-env-resolution', so harbor lint cannot check"
+old_compose+=" the compose image; update Docker Compose to 2.35 or later"
 if grep -q -- --no-env-resolution <<<"$compose"; then
   harbor lint "$TASKS"/*/
+elif [ -n "${CI:-}" ]; then
+  fail "$old_compose"
 else
-  echo "skip harbor lint: this Docker Compose lacks 'config --no-env-resolution', so harbor" \
-    "lint cannot check the compose image; update Docker Compose to run it"
+  echo "skip harbor lint: $old_compose to run it"
 fi
 
 echo "== gate: golden, nop and probe runs of every task"
