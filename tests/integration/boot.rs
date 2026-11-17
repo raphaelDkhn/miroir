@@ -3,6 +3,8 @@
 
 use std::time::{Duration, Instant};
 
+use jiff::{SignedDuration, Timestamp};
+use miroir::pg::{Shift, shift_between};
 use serde_json::{Value, json};
 
 use crate::common::{WORLD, World, docker_ok, grade, manifest_with, spec};
@@ -113,25 +115,41 @@ fn times(world: &World) -> Vec<i64> {
     world.psql(TIMES).split('|').map(|value| value.parse().unwrap()).collect()
 }
 
-/// The image's `bake.json`, its bake moved `days` earlier.
-fn baked_earlier(days: i64) -> String {
-    let baked = docker_ok(&["run", "--rm", WORLD, "cat", "/miroir/bake.json"]);
-    let mut info: Value = serde_json::from_str(&baked).unwrap();
-    let at: jiff::Timestamp = info["baked_at"].as_str().unwrap().parse().unwrap();
-    let earlier = at.checked_sub(jiff::SignedDuration::from_hours(24 * days)).unwrap();
-    info["baked_at"] = json!(earlier.to_string());
-    info.to_string()
+/// The shift a world's boot logged; none when it moved nothing.
+fn logged_shift(world: &World) -> Shift {
+    let logs = world.logs();
+    let Some(line) = logs.lines().find(|line| line.contains(" shifting dates ")) else {
+        return Shift { timestamps: 0, dates: 0 };
+    };
+    let field = |name: &str| -> i64 {
+        let (_, value) = line.split_once(&format!(" {name}=")).unwrap();
+        value.split(' ').next().unwrap().parse().unwrap()
+    };
+    Shift { timestamps: field("days"), dates: field("calendar_days") }
 }
 
 #[test]
 #[ignore = "needs Docker and `docker buildx bake`"]
 fn a_world_baked_days_earlier_boots_with_every_time_column_moved_as_many_days() {
-    let base = times(&World::boot());
-    let world = World::boot_with(&[("/miroir/bake.json", &baked_earlier(DAYS))], &[]);
-    assert!(world.logs().contains(&format!("days={DAYS} calendar_days={DAYS}")), "no shift");
+    let bake_json = docker_ok(&["run", "--rm", WORLD, "cat", "/miroir/bake.json"]);
+    let mut info: Value = serde_json::from_str(&bake_json).unwrap();
+    let baked: Timestamp = info["baked_at"].as_str().unwrap().parse().unwrap();
+    let first = Timestamp::now();
+    let world = World::boot();
+    let (base, base_shift) = (times(&world), logged_shift(&world));
+    drop(world);
+    let earlier = baked.checked_sub(SignedDuration::from_hours(24 * DAYS)).unwrap();
+    info["baked_at"] = json!(earlier.to_string());
+    let world = World::boot_with(&[("/miroir/bake.json", &info.to_string())], &[]);
+    let shift = logged_shift(&world);
+    let (days, dates) = (shift.timestamps - base_shift.timestamps, shift.dates - base_shift.dates);
+    // The image's age shifts both boots alike, unless a day boundary passed between them.
+    if shift_between(baked, first) == shift_between(baked, Timestamp::now()) {
+        assert_eq!((days, dates), (DAYS, DAYS), "the boots logged {base_shift:?}, {shift:?}");
+    }
     let moved = times(&world);
     let delta: Vec<i64> = moved.iter().zip(&base).map(|(moved, base)| moved - base).collect();
-    let (seconds, dates) = (DAYS * DAY_SECONDS, DAYS);
+    let seconds = days * DAY_SECONDS;
     assert_eq!(delta[0], seconds, "deals.created_at, a timestamp");
     assert_eq!(delta[1], seconds, "deals.updated_at, whose product trigger the shift skips");
     assert_eq!(delta[2], dates, "deals.expected_close, a date");
