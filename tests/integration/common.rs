@@ -226,9 +226,17 @@ impl World {
         docker_ok(&["inspect", "--format", "{{.State.Running}}", self.id()]) == "true"
     }
 
-    /// Wait for the world's container to end; its exit status.
+    /// Wait for the world's container to end; its exit status. A world that becomes ready
+    /// instead, or still runs after the boot limit, fails the test.
     pub fn wait_exit(&self) -> i32 {
-        docker_ok(&["wait", self.id()]).parse().unwrap()
+        let deadline = Instant::now() + BOOT_LIMIT;
+        while self.running() {
+            let ready = self.exec(&["test", "-e", "/miroir/run/ready"]).status.success();
+            assert!(!ready, "the world booted instead of stopping:\n{}", self.logs());
+            assert!(Instant::now() < deadline, "the world did not stop in time:\n{}", self.logs());
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        docker_ok(&["inspect", "--format", "{{.State.ExitCode}}", self.id()]).parse().unwrap()
     }
 
     /// Everything `miroir run` and the processes printed.
