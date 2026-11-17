@@ -1,0 +1,20 @@
+# The acme world: the agent runs in `main`; Acme CRM, its datastores and Miroir run in
+# `acme-crm`, on a network with no way out. Only port 3000 is reachable from `main`.
+services:
+  main:
+    depends_on:
+      acme-crm:
+        condition: service_healthy
+    networks: [default, world]
+  acme-crm:
+    image: acme-crm-env:dev        # published: ghcr.io/<you>/acme-crm-env:<tag>@sha256:<digest>
+    healthcheck:
+      test: ["CMD-SHELL", "test -e /miroir/run/ready"]
+      interval: 1s
+      timeout: 5s
+      retries: 300
+    mem_limit: 2g
+    networks: [world]
+networks:
+  world:
+    internal: true

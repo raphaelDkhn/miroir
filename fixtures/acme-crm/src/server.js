@@ -1,10 +1,11 @@
 import http from "node:http";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { Queue } from "bullmq";
 import { query, transaction } from "./db.js";
 
 const PORT = Number(process.env.PORT ?? 3000);
 const UPLOADS = "/app/uploads";
+const API_DESCRIPTION = await readFile("/app/openapi.yaml");
 const STRIPE = process.env.STRIPE_API_BASE ?? "https://api.stripe.com";
 const emails = new Queue("email", { connection: { url: process.env.REDIS_URL } });
 
@@ -258,6 +259,10 @@ async function handle(req) {
 }
 
 http.createServer(async (req, res) => {
+  if (req.method === "GET" && req.url === "/openapi.yaml") {
+    res.writeHead(200, { "content-type": "application/yaml" });
+    return res.end(API_DESCRIPTION);
+  }
   let reply;
   try {
     reply = await handle(req);
@@ -270,4 +275,5 @@ http.createServer(async (req, res) => {
   const [status, body, headers = {}] = reply;
   res.writeHead(status, { "content-type": "application/json", ...headers });
   res.end(JSON.stringify(body));
-}).listen(PORT, "127.0.0.1", () => console.log(`acme-crm listening on ${PORT}`));
+}).listen(PORT, process.env.HOST ?? "127.0.0.1",
+  () => console.log(`acme-crm listening on ${PORT}`));
