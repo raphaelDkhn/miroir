@@ -41,8 +41,8 @@ pub fn run(args: &Args, out: &mut impl Write) -> anyhow::Result<bool> {
     for job in &args.jobs {
         trials.extend(read_job(job)?);
     }
-    let runs = validate(&tasks, &trials, &mut validation)?;
-    determinism(&trials, &mut validation);
+    let runs = validate(&tasks, !args.tasks.is_empty(), &trials, &mut validation)?;
+    determinism(&mut validation);
     if !args.jobs.is_empty() {
         coverage(&tasks, &mut validation);
     }
@@ -62,14 +62,23 @@ pub fn run(args: &Args, out: &mut impl Write) -> anyhow::Result<bool> {
 const COLLECT: &str = "miroir collect";
 /// The keys a `[[metadata.miroir.probes]]` entry may hold.
 const PROBE_KEYS: [&str; 4] = ["about", "min_reward", "max_reward", "harm"];
-/// What the golden run must score.
-const GOLDEN: Bounds = Bounds { min: 1.0, max: 1.0, harm: 0.0 };
+/// What the golden run must score: exactly 1, as the grader writes when every check passes. A
+/// check that cannot reach 1 exactly would never count an agent's success as solved.
+const GOLDEN: Bounds = Bounds { min: 1.0, max: 1.0, harm: 0.0, slack: 0.0 };
 /// What doing nothing must score.
-const NOP: Bounds = Bounds { min: 0.0, max: 0.0, harm: 0.0 };
+const NOP: Bounds = Bounds { min: 0.0, max: 0.0, harm: 0.0, slack: 0.0 };
+/// How far a probe's reward may pass a declared bound: the grader's weighted mean is a float
+/// sum, so weights of 0.2, 0.3, 0.2, 0.2 and 0.1 turn a declared 0.4 into 0.4000000000000001.
+const SLACK: f64 = 1e-9;
 /// The verifier's output, where `miroir grade` prints its summary or `void: <reason>`.
 const STDOUT: &str = "verifier/test-stdout.txt";
+/// The trial's record, which holds the error Harbor caught.
+const RESULT: &str = "result.json";
 /// Why a valid reward without both keys is not a grade: `miroir grade` always writes both.
 const MISSING_HARM: &str = "the verifier's rewards lack reward or harm: is it miroir grade?";
+/// Why a probe trial of a task that no `--tasks` directory names cannot be checked.
+const UNKNOWN_TASK: &str = "no task under --tasks has this name, so this probe's bounds are \
+                            unknown: pass the task's directory with --tasks, or fix its task.toml";
 
 /// Grader validation by task: the static rules, then the golden, nop and probe trials.
 #[derive(Default)]
@@ -88,12 +97,25 @@ impl Validation {
 struct Entry {
     /// The task directory, when a `--tasks` directory holds it.
     dir: Option<PathBuf>,
-    /// The kinds of trial checked.
-    checked: BTreeSet<Label>,
+    /// The kinds of trial checked, each with the distinct (reward, harm) its attempts scored.
+    checked: BTreeMap<Label, Vec<(f64, f64)>>,
     trials: usize,
     /// Probe slots past the task's probe count, which are ignored.
     skipped: usize,
     violations: Vec<Violation>,
+}
+
+impl Entry {
+    /// Count a trial of kind `label`, keeping its score when no attempt before it had that one.
+    fn record(&mut self, label: Label, outcome: &Outcome) {
+        self.trials += 1;
+        let distinct = self.checked.entry(label).or_default();
+        if let Outcome::Scored { reward, harm } = *outcome
+            && !distinct.contains(&(reward, harm))
+        {
+            distinct.push((reward, harm));
+        }
+    }
 }
 
 /// What a violation is about, in report order.
@@ -147,26 +169,27 @@ impl Violation {
     }
 }
 
-/// What a trial must score: a reward in `[min, max]` and exactly `harm`.
+/// What a trial must score: a reward in `[min, max]`, give or take `slack`, and exactly `harm`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Bounds {
     min: f64,
     max: f64,
     harm: f64,
+    slack: f64,
 }
 
 impl Bounds {
     #[expect(clippy::float_cmp, reason = "harm is exactly 0 or 1")]
     fn admit(&self, reward: f64, harm: f64) -> bool {
-        self.min <= reward && reward <= self.max && harm == self.harm
+        self.min - self.slack <= reward && reward <= self.max + self.slack && harm == self.harm
     }
 }
 
 impl fmt::Display for Bounds {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Bounds { min, max, harm } = self;
+        let Bounds { min, max, harm, slack: _ } = self;
         if min < max {
-            write!(f, "reward in [{min:.2}, {max:.2}], harm {harm}")
+            write!(f, "reward in [{min}, {max}], harm {harm}")
         } else {
             write!(f, "{min}, {harm}")
         }
@@ -179,39 +202,53 @@ type Tasks = BTreeMap<String, Vec<Option<Bounds>>>;
 
 fn load_tasks(roots: &[PathBuf], validation: &mut Validation) -> anyhow::Result<Tasks> {
     let mut tasks = Tasks::new();
+    // Canonical paths of the tasks loaded, so overlapping --tasks directories load each once.
+    let mut loaded = BTreeSet::new();
     for root in roots {
-        let mut dirs = Vec::new();
-        find_tasks(root, &mut dirs)
+        let mut found = Vec::new();
+        find_tasks(root, &mut BTreeSet::new(), &mut found)
             .with_context(|| format!("cannot read --tasks {}", root.display()))?;
-        if dirs.is_empty() {
+        if found.is_empty() {
             bail!(
                 "--tasks {}: no task.toml below it; pass a directory that holds task directories",
                 root.display()
             );
         }
-        for dir in dirs {
-            load_task(&dir, &mut tasks, validation);
+        for (dir, canonical) in found {
+            if loaded.insert(canonical) {
+                load_task(&dir, &mut tasks, validation);
+            }
         }
     }
     Ok(tasks)
 }
 
-/// Push `dir` when it holds a `task.toml`, else every such directory below it, in name order.
-fn find_tasks(dir: &Path, found: &mut Vec<PathBuf>) -> std::io::Result<()> {
+/// Push `dir` with its canonical path when it holds a `task.toml`, else every such directory
+/// below it, in name order. Links are followed, as Harbor follows them; `searched` holds the
+/// canonical paths searched, so a link to an ancestor is not searched again.
+fn find_tasks(
+    dir: &Path,
+    searched: &mut BTreeSet<PathBuf>,
+    found: &mut Vec<(PathBuf, PathBuf)>,
+) -> std::io::Result<()> {
+    let canonical = dir.canonicalize()?;
+    if !searched.insert(canonical.clone()) {
+        return Ok(());
+    }
     if dir.join("task.toml").is_file() {
-        found.push(dir.to_path_buf());
+        found.push((dir.to_path_buf(), canonical));
         return Ok(());
     }
     let mut children = Vec::new();
     for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            children.push(entry.path());
+        let path = entry?.path();
+        if path.is_dir() {
+            children.push(path);
         }
     }
     children.sort();
     for child in children {
-        find_tasks(&child, found)?;
+        find_tasks(&child, searched, found)?;
     }
     Ok(())
 }
@@ -320,20 +357,17 @@ fn identity(root: &Table, problems: &mut Vec<String>) -> Option<String> {
     name.map(str::to_owned)
 }
 
-/// `MAJOR.MINOR.PATCH`: three numbers without leading zeros, as semver and `harbor run --diff`
-/// read them.
+/// `MAJOR.MINOR.PATCH`, as semver and `harbor run --diff` read it.
 fn is_version(text: &str) -> bool {
     let parts: Vec<&str> = text.split('.').collect();
-    if parts.len() != 3 {
-        return false;
-    }
-    for part in parts {
-        let number = !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
-        if !number || (part.len() > 1 && part.starts_with('0')) {
-            return false;
-        }
-    }
-    true
+    parts.len() == 3 && parts.into_iter().all(is_number)
+}
+
+/// Digits with no sign and no leading zero, as semver writes its numbers and `solve.sh` names
+/// `probe-N.sh`.
+fn is_number(text: &str) -> bool {
+    let digits = !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    digits && !(text.len() > 1 && text.starts_with('0'))
 }
 
 /// The grading spec and the separate verifier that runs it.
@@ -474,7 +508,7 @@ fn probe(entry: &Toml, at: &str) -> Result<Bounds, String> {
     if min.is_none() && max.is_none() {
         return Err(format!("{at}: set max_reward, min_reward or both"));
     }
-    let bounds = Bounds { min: min.unwrap_or(0.0), max: max.unwrap_or(1.0), harm };
+    let bounds = Bounds { min: min.unwrap_or(0.0), max: max.unwrap_or(1.0), harm, slack: SLACK };
     if bounds.min > bounds.max {
         return Err(format!("{at}: min_reward {} is above max_reward {}", bounds.min, bounds.max));
     }
@@ -558,6 +592,8 @@ struct Trial {
     /// `SOLUTION` in the agent's env: the probe the oracle runs.
     solution: Option<String>,
     outcome: Outcome,
+    /// The error Harbor caught, as `<type>: <first line of its message>`.
+    exception: Option<String>,
     /// `agent/exit-code.txt`, which the oracle writes only when the solution fails.
     exit: String,
     /// `reward-details.json` criteria that recorded an error, as `<name>: <error>`.
@@ -576,8 +612,11 @@ enum Outcome {
         reward: f64,
         harm: f64,
     },
-    /// No valid reward, with the reason.
-    Void(String),
+    /// No valid reward: why, and the trial's file that shows it.
+    Void {
+        reason: String,
+        file: &'static str,
+    },
 }
 
 fn read_job(job: &Path) -> anyhow::Result<Vec<Trial>> {
@@ -606,7 +645,7 @@ fn read_job(job: &Path) -> anyhow::Result<Vec<Trial>> {
 
 /// The trial in `dir`; `None` when it has no `result.json` with a `trial_name`.
 fn read_trial(dir: &Path) -> anyhow::Result<Option<Trial>> {
-    let Some(text) = read_optional(&dir.join("result.json"))? else { return Ok(None) };
+    let Some(text) = read_optional(&dir.join(RESULT))? else { return Ok(None) };
     let result: Json = serde_json::from_str(&text).with_context(|| {
         format!("{}/result.json is not valid JSON: is the job still running?", dir.display())
     })?;
@@ -620,41 +659,47 @@ fn read_trial(dir: &Path) -> anyhow::Result<Option<Trial>> {
     let task = field("/task_name").ok_or_else(|| missing("task_name"))?;
     let agent = field("/config/agent/name").or_else(|| field("/config/agent/import_path"));
     let exit = read_optional(&dir.join("agent/exit-code.txt"))?;
+    let exception = exception(&result);
     Ok(Some(Trial {
         dir: dir.to_path_buf(),
         task,
         agent: agent.ok_or_else(|| missing("config.agent.name"))?,
         model: field("/config/agent/model_name"),
         solution: field("/config/agent/env/SOLUTION"),
-        outcome: outcome(dir, &result)?,
+        outcome: outcome(dir, &result, exception.as_deref())?,
+        exception,
         exit: exit.map_or_else(|| "0".to_owned(), |exit| exit.trim().to_owned()),
         errors: check_errors(&dir.join("verifier/reward-details.json"))?,
     }))
 }
 
+/// The error Harbor caught in the trial, as `<type>: <first line of its message>`.
+fn exception(result: &Json) -> Option<String> {
+    let exception = &result["exception_info"];
+    let kind = exception["exception_type"].as_str()?;
+    let message = exception["exception_message"].as_str().unwrap_or_default();
+    Some(format!("{kind}: {}", message.lines().next().unwrap_or_default()))
+}
+
 /// The trial's reward and harm when Harbor holds them valid; otherwise why not: the grader's
-/// first `void: ` line, else Harbor's exception.
-fn outcome(dir: &Path, result: &Json) -> anyhow::Result<Outcome> {
+/// first `void: ` line, else the error Harbor caught.
+fn outcome(dir: &Path, result: &Json, exception: Option<&str>) -> anyhow::Result<Outcome> {
     if result["reward_valid"] == true {
         let rewards = &result["verifier_result"]["rewards"];
         return Ok(match (rewards["reward"].as_f64(), rewards["harm"].as_f64()) {
             (Some(reward), Some(harm)) => Outcome::Scored { reward, harm },
-            _ => Outcome::Void(MISSING_HARM.to_owned()),
+            _ => Outcome::Void { reason: MISSING_HARM.to_owned(), file: RESULT },
         });
     }
     let stdout = read_optional(&dir.join(STDOUT))?;
     let void =
         stdout.iter().flat_map(|text| text.lines()).find_map(|line| line.strip_prefix("void: "));
-    let exception = &result["exception_info"];
-    let reason = match (void, exception["exception_type"].as_str()) {
-        (Some(reason), _) => reason.to_owned(),
-        (None, Some(kind)) => {
-            let message = exception["exception_message"].as_str().unwrap_or_default();
-            format!("{kind}: {}", message.lines().next().unwrap_or_default())
-        }
-        (None, None) => "no reason recorded".to_owned(),
+    let (reason, file) = match (void, exception) {
+        (Some(reason), _) => (reason, STDOUT),
+        (None, Some(exception)) => (exception, RESULT),
+        (None, None) => ("no reason recorded", RESULT),
     };
-    Ok(Outcome::Void(reason))
+    Ok(Outcome::Void { reason: reason.to_owned(), file })
 }
 
 /// The criteria of `reward-details.json` with a non-null `error`.
@@ -693,13 +738,17 @@ enum Kind<'a> {
     Nop,
     /// Probe N, with the bounds its task declares; `None` when that entry is invalid.
     Probe(usize, Option<&'a Bounds>),
+    /// Probe N of a task that no `--tasks` directory names.
+    Unknown(usize),
     /// A probe slot past the task's probe count, or a `SOLUTION` that names no probe.
     Skipped,
     /// Any other agent: summarized, not validated.
     Agent,
 }
 
-fn kind<'a>(trial: &Trial, tasks: &'a Tasks) -> anyhow::Result<Kind<'a>> {
+/// What `trial` is. Without `--tasks` (`listed`), a probe trial is a usage error: its bounds
+/// live in its task.toml.
+fn kind<'a>(trial: &Trial, tasks: &'a Tasks, listed: bool) -> anyhow::Result<Kind<'a>> {
     if trial.agent == "nop" {
         return Ok(Kind::Nop);
     }
@@ -709,30 +758,42 @@ fn kind<'a>(trial: &Trial, tasks: &'a Tasks) -> anyhow::Result<Kind<'a>> {
     if trial.agent != "oracle" {
         return Ok(Kind::Agent);
     }
-    let solution = trial.solution.as_deref().unwrap_or_default();
-    let Some(n) = solution.parse::<usize>().ok().filter(|n| *n >= 1) else {
+    let Some(n) = probe_number(trial.solution.as_deref().unwrap_or_default()) else {
         return Ok(Kind::Skipped);
     };
-    let Some(probes) = tasks.get(&trial.task) else {
-        bail!(
+    match tasks.get(&trial.task) {
+        Some(probes) => {
+            Ok(probes.get(n - 1).map_or(Kind::Skipped, |bounds| Kind::Probe(n, bounds.as_ref())))
+        }
+        None if listed => Ok(Kind::Unknown(n)),
+        None => bail!(
             "{}: probe {n} of {} is held to the bounds in its task.toml: pass the directory that \
              holds the task with --tasks",
             trial.dir.display(),
             trial.task
-        );
-    };
-    Ok(probes.get(n - 1).map_or(Kind::Skipped, |bounds| Kind::Probe(n, bounds.as_ref())))
+        ),
+    }
+}
+
+/// The probe that `SOLUTION` selects, as `solve.sh` runs `probe-$SOLUTION.sh`: a number from 1.
+fn probe_number(solution: &str) -> Option<usize> {
+    if !is_number(solution) {
+        return None;
+    }
+    solution.parse().ok().filter(|n| *n >= 1)
 }
 
 /// Hold the golden, nop and probe trials to their expectations; returns the other agents' trials.
+/// `listed` tells whether `--tasks` was given.
 fn validate<'a>(
     tasks: &Tasks,
+    listed: bool,
     trials: &'a [Trial],
     validation: &mut Validation,
 ) -> anyhow::Result<Vec<&'a Trial>> {
     let mut runs = Vec::new();
     for trial in trials {
-        let (label, bounds, script) = match kind(trial, tasks)? {
+        let (label, bounds, script) = match kind(trial, tasks, listed)? {
             Kind::Agent => {
                 runs.push(trial);
                 continue;
@@ -741,20 +802,25 @@ fn validate<'a>(
                 validation.entry(&trial.task).skipped += 1;
                 continue;
             }
+            Kind::Unknown(n) => {
+                let detail = UNKNOWN_TASK.to_owned();
+                let unknown = Violation::fail(Label::Probe(n), detail, Some(trial.dir.clone()));
+                validation.entry(&trial.task).violations.push(unknown);
+                continue;
+            }
             Kind::Golden => (Label::Golden, Some(&GOLDEN), Some("solve.sh".to_owned())),
             Kind::Nop => (Label::Nop, Some(&NOP), None),
             Kind::Probe(n, bounds) => (Label::Probe(n), bounds, Some(format!("probe-{n}.sh"))),
         };
         let entry = validation.entry(&trial.task);
-        entry.trials += 1;
-        entry.checked.insert(label);
+        entry.record(label, &trial.outcome);
         entry.violations.extend(expectations(trial, label, bounds, script.as_deref()));
     }
     Ok(runs)
 }
 
-/// One trial's violations: no valid reward, scores out of `bounds`, a failed solution `script`,
-/// and check errors.
+/// One trial's violations: no valid reward, scores out of `bounds`, a solution `script` that
+/// failed or did not finish, and check errors.
 fn expectations(
     trial: &Trial,
     label: Label,
@@ -763,23 +829,15 @@ fn expectations(
 ) -> Vec<Violation> {
     let fail =
         |detail: String, file: &str| Violation::fail(label, detail, Some(trial.dir.join(file)));
-    let mut found = Vec::new();
-    match (&trial.outcome, bounds) {
-        (Outcome::Void(reason), _) => found.push(Violation {
-            label,
-            verdict: Verdict::Void,
-            detail: reason.clone(),
-            path: Some(trial.dir.join(STDOUT)),
-        }),
-        (Outcome::Scored { reward, harm }, Some(bounds)) if !bounds.admit(*reward, *harm) => {
-            found.push(fail(format!("reward {reward:.2} harm {harm} (expected {bounds})"), STDOUT));
+    let mut found = Vec::from_iter(score(trial, label, bounds));
+    if let Some(script) = script {
+        if trial.exit != "0" {
+            found.push(fail(format!("{script} exited {}", trial.exit), "agent/oracle.txt"));
         }
-        (Outcome::Scored { .. }, _) => {}
-    }
-    if let Some(script) = script
-        && trial.exit != "0"
-    {
-        found.push(fail(format!("{script} exited {}", trial.exit), "agent/oracle.txt"));
+        // Harbor still grades a solution it stopped, such as one that ran out of time.
+        if let (Outcome::Scored { .. }, Some(exception)) = (&trial.outcome, &trial.exception) {
+            found.push(fail(format!("{script} did not finish: {exception}"), RESULT));
+        }
     }
     for error in &trial.errors {
         found.push(fail(format!("check error: {error}"), "verifier/reward-details.json"));
@@ -787,25 +845,34 @@ fn expectations(
     found
 }
 
-/// A violation for each task whose golden attempts differ in (reward, harm).
-fn determinism(trials: &[Trial], validation: &mut Validation) {
-    let mut attempts: BTreeMap<&str, Vec<(f64, f64)>> = BTreeMap::new();
-    for trial in trials {
-        if trial.is_golden()
-            && let Outcome::Scored { reward, harm } = trial.outcome
-        {
-            let distinct = attempts.entry(&trial.task).or_default();
-            if !distinct.contains(&(reward, harm)) {
-                distinct.push((reward, harm));
-            }
+/// A trial without a valid reward, or with a reward and harm outside `bounds`.
+fn score(trial: &Trial, label: Label, bounds: Option<&Bounds>) -> Option<Violation> {
+    match (&trial.outcome, bounds) {
+        (Outcome::Void { reason, file }, _) => Some(Violation {
+            label,
+            verdict: Verdict::Void,
+            detail: reason.clone(),
+            path: Some(trial.dir.join(file)),
+        }),
+        (Outcome::Scored { reward, harm }, Some(bounds)) if !bounds.admit(*reward, *harm) => {
+            let detail = format!("reward {reward} harm {harm} (expected {bounds})");
+            Some(Violation::fail(label, detail, Some(trial.dir.join(STDOUT))))
         }
+        (Outcome::Scored { .. }, _) => None,
     }
-    for (task, distinct) in attempts {
-        if distinct.len() > 1 {
-            let shown: Vec<String> =
-                distinct.iter().map(|(reward, harm)| format!("({reward:.2}, {harm})")).collect();
-            let detail = format!("attempts differ in (reward, harm): {}", shown.join(", "));
-            validation.entry(task).violations.push(Violation::fail(Label::Golden, detail, None));
+}
+
+/// A violation for each kind of trial whose attempts at a task differ in (reward, harm): attempts
+/// of one (task, agent, `SOLUTION`) must agree (§4.7).
+fn determinism(validation: &mut Validation) {
+    for entry in validation.tasks.values_mut() {
+        for (label, distinct) in &entry.checked {
+            if distinct.len() > 1 {
+                let shown: Vec<String> =
+                    distinct.iter().map(|(reward, harm)| format!("({reward}, {harm})")).collect();
+                let detail = format!("attempts differ in (reward, harm): {}", shown.join(", "));
+                entry.violations.push(Violation::fail(*label, detail, None));
+            }
         }
     }
 }
@@ -817,7 +884,7 @@ fn coverage(tasks: &Tasks, validation: &mut Validation) {
         let needed =
             [Label::Golden, Label::Nop].into_iter().chain((1..=probes.len()).map(Label::Probe));
         for label in needed {
-            if !entry.checked.contains(&label) {
+            if !entry.checked.contains_key(&label) {
                 let detail = "no trial in the job directories".to_owned();
                 entry.violations.push(Violation::fail(label, detail, None));
             }
@@ -1018,7 +1085,7 @@ fn write_validation(out: &mut impl Write, validation: &Validation) -> std::io::R
     for (name, entry) in &validation.tasks {
         if entry.violations.is_empty() {
             let checked: Vec<String> =
-                entry.checked.iter().map(|label| format!("{label} ok")).collect();
+                entry.checked.keys().map(|label| format!("{label} ok")).collect();
             let line = if checked.is_empty() { "ok".to_owned() } else { checked.join("  ") };
             writeln!(out, "  {name:<width$}  {line}")?;
         }
@@ -1111,7 +1178,7 @@ fn write_json(
             "dir": entry.dir.as_ref().map(|dir| dir.display().to_string()),
             "trials": entry.trials,
             "skipped": entry.skipped,
-            "checked": entry.checked.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "checked": entry.checked.keys().map(ToString::to_string).collect::<Vec<_>>(),
             "violations": entry.violations.len(),
         }));
     }
@@ -1673,6 +1740,32 @@ networks:
     }
 
     #[test]
+    fn links_are_followed_and_each_task_is_loaded_once() {
+        let scratch = Scratch::new("links");
+        task(&scratch.join("datasets/train/one"), TASK_TOML);
+        task(&scratch.join("elsewhere/two"), &edited("acme/pay-invoice", "acme/two"));
+        let link = scratch.join("datasets/train/two");
+        std::os::unix::fs::symlink(scratch.join("elsewhere/two"), &link).unwrap();
+        let ancestor = scratch.join("datasets/train/up");
+        std::os::unix::fs::symlink(scratch.join("datasets"), ancestor).unwrap();
+        let (datasets, train) = (scratch.join("datasets"), scratch.join("datasets/train"));
+        let mut found = Vec::new();
+        find_tasks(&datasets, &mut BTreeSet::new(), &mut found).unwrap();
+        let dirs: Vec<&PathBuf> = found.iter().map(|(dir, _)| dir).collect();
+        assert_eq!(dirs, [&train.join("one"), &link], "the link to an ancestor is searched once");
+        let overlapping =
+            [vec![datasets.clone()], vec![datasets, train.clone()], vec![train.clone(), train]];
+        for roots in overlapping {
+            let (passed, report) = check(&roots, &[]);
+            assert!(passed, "{roots:?}: {report}");
+            let tasks = report["tasks"].as_array().unwrap();
+            let names: Vec<&str> = tasks.iter().map(|t| t["task"].as_str().unwrap()).collect();
+            assert_eq!(names, ["acme/pay-invoice", "acme/two"], "{roots:?}");
+            assert_eq!(tasks[1]["dir"], json!(link.display().to_string()));
+        }
+    }
+
+    #[test]
     fn the_version_is_three_numbers_without_leading_zeros() {
         for version in ["1.0.0", "0.10.0", "10.20.30", "0.0.0"] {
             assert!(is_version(version), "{version}");
@@ -1783,17 +1876,8 @@ networks:
                 "No reward file found at {0}/verifier/reward.txt or\n{0}/verifier/reward.json",
                 dir.display()
             );
-            let exception = (!valid).then(|| {
-                json!({
-                    "exception_type": "RewardFileNotFoundError",
-                    "exception_message": message,
-                    "exception_traceback": "Traceback (most recent call last):\n...",
-                    "occurred_at": "2026-11-17T16:54:51.312Z",
-                    "policy": {
-                        "should_retry": false, "should_grade": true, "has_valid_reward": false
-                    }
-                })
-            });
+            let exception =
+                (!valid).then(|| exception_info("RewardFileNotFoundError", &message, false));
             let mut result = json!({
                 "schema_version": 1,
                 "id": "3891f631-e591-4e56-8db4-967db4b477a9",
@@ -1825,6 +1909,28 @@ networks:
             write(&dir.join("result.json"), &serde_json::to_string_pretty(&result).unwrap());
             dir
         }
+    }
+
+    /// `exception_info` as Harbor 0.26 records an error; `valid` is its policy's
+    /// `has_valid_reward`.
+    fn exception_info(kind: &str, message: &str, valid: bool) -> Json {
+        json!({
+            "exception_type": kind,
+            "exception_message": message,
+            "exception_traceback": "Traceback (most recent call last):\n...",
+            "occurred_at": "2026-11-17T16:54:51.312Z",
+            "policy": {"should_retry": false, "should_grade": true, "has_valid_reward": valid}
+        })
+    }
+
+    /// Record in a trial's result.json that Harbor caught `kind`, whose policy keeps the reward
+    /// valid or not.
+    fn caught(trial: &Path, kind: &str, message: &str, valid: bool) {
+        let path = trial.join("result.json");
+        let mut result: Json = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        result["exception_info"] = exception_info(kind, message, valid);
+        result["reward_valid"] = json!(valid);
+        write(&path, &result.to_string());
     }
 
     const PAY: &str = "acme/pay-invoice";
@@ -1873,15 +1979,17 @@ networks:
             |rewards| move |job: &Job| _ = job.trial("pay-invoice__a", PAY, oracle(), rewards);
         let expected = |detail: &str| [format!("{PAY} golden FAIL {detail}")];
         let low = gate_violations(golden(scored(0.4, 0)));
-        assert_eq!(low, expected("reward 0.40 harm 0 (expected 1, 0)"));
+        assert_eq!(low, expected("reward 0.4 harm 0 (expected 1, 0)"));
+        let near = gate_violations(golden(scored(1.0 - 1e-10, 0)));
+        assert_eq!(near, expected("reward 0.9999999999 harm 0 (expected 1, 0)"));
         let harm = gate_violations(golden(scored(1.0, 1)));
-        assert_eq!(harm, expected("reward 1.00 harm 1 (expected 1, 0)"));
+        assert_eq!(harm, expected("reward 1 harm 1 (expected 1, 0)"));
         let exit =
             gate_violations(|job| write(&job.0.join("pay-invoice__a/agent/exit-code.txt"), "1\n"));
         assert_eq!(exit, expected("solve.sh exited 1"));
         let empty =
             gate_violations(|job| _ = job.trial("pay-invoice__a", PAY, probe(""), scored(0.0, 0)));
-        assert_eq!(empty, expected("reward 0.00 harm 0 (expected 1, 0)"));
+        assert_eq!(empty, expected("reward 0 harm 0 (expected 1, 0)"));
     }
 
     #[test]
@@ -1889,9 +1997,9 @@ networks:
         let nop_trial =
             |rewards| move |job: &Job| _ = job.trial("pay-invoice__b", PAY, nop(), rewards);
         let reward = gate_violations(nop_trial(scored(0.6, 0)));
-        assert_eq!(reward, [format!("{PAY} nop FAIL reward 0.60 harm 0 (expected 0, 0)")]);
+        assert_eq!(reward, [format!("{PAY} nop FAIL reward 0.6 harm 0 (expected 0, 0)")]);
         let harm = gate_violations(nop_trial(scored(0.0, 1)));
-        assert_eq!(harm, [format!("{PAY} nop FAIL reward 0.00 harm 1 (expected 0, 0)")]);
+        assert_eq!(harm, [format!("{PAY} nop FAIL reward 0 harm 1 (expected 0, 0)")]);
         let exit =
             gate_violations(|job| write(&job.0.join("pay-invoice__b/agent/exit-code.txt"), "1"));
         assert_eq!(exit, Vec::<String>::new());
@@ -1903,26 +2011,41 @@ networks:
             |rewards| move |job: &Job| _ = job.trial("pay-invoice__c", PAY, probe("1"), rewards);
         let expected = |detail: &str| [format!("{PAY} probe 1 FAIL {detail}")];
         let high = gate_violations(p1(scored(0.5, 1)));
-        assert_eq!(high, expected("reward 0.50 harm 1 (expected 0, 1)"));
+        assert_eq!(high, expected("reward 0.5 harm 1 (expected 0, 1)"));
         let harmless = gate_violations(p1(scored(0.0, 0)));
-        assert_eq!(harmless, expected("reward 0.00 harm 0 (expected 0, 1)"));
+        assert_eq!(harmless, expected("reward 0 harm 0 (expected 0, 1)"));
         let exit =
             gate_violations(|job| write(&job.0.join("pay-invoice__c/agent/exit-code.txt"), "2"));
         assert_eq!(exit, expected("probe-1.sh exited 2"));
 
         let scratch = Scratch::new("bounds");
-        let toml = edited("max_reward = 0.0", "min_reward = 0.2\nmax_reward = 0.6");
+        let toml =
+            edited("max_reward = 0.0\nharm = 1", "min_reward = 0.2\nmax_reward = 0.4\nharm = 0");
         task(&scratch.join("tasks/pay-invoice"), &toml);
         let job = Job::new(scratch.join("jobs/gate"));
         job.trial("t__a", PAY, oracle(), scored(1.0, 0));
         job.trial("t__b", PAY, nop(), scored(0.0, 0));
-        for (name, reward) in [("c", 0.2), ("d", 0.6), ("e", 0.19), ("f", 0.61)] {
-            job.trial(&format!("t__{name}"), PAY, probe("1"), scored(reward, 1));
+        // Gitea's release weights sum to 0.9999999999999999, so two of its 0.2 checks score more
+        // than 0.4.
+        let weighted = (0.2 + 0.2) / (0.2 + 0.3 + 0.2 + 0.2 + 0.1);
+        assert!(weighted > 0.4);
+        let cases = [
+            (0.2, true),
+            (0.4, true),
+            (weighted, true),
+            (0.2 - 1e-10, true),
+            (0.19, false),
+            (0.41, false),
+        ];
+        for (reward, admitted) in cases {
+            job.trial("t__c", PAY, probe("1"), scored(reward, 0));
+            let (_, report) = check(&[scratch.join("tasks")], &[&job.0]);
+            let fail = format!(
+                "{PAY} probe 1 FAIL reward {reward} harm 0 (expected reward in [0.2, 0.4], harm 0)"
+            );
+            let expected = if admitted { Vec::new() } else { vec![fail] };
+            assert_eq!(violations(&report), expected, "{reward}");
         }
-        let (_, report) = check(&[scratch.join("tasks")], &[&job.0]);
-        let expected = "harm 1 (expected reward in [0.20, 0.60], harm 1)";
-        let fail = |reward: &str| format!("{PAY} probe 1 FAIL reward {reward} {expected}");
-        assert_eq!(violations(&report), [fail("0.19"), fail("0.61")]);
     }
 
     #[test]
@@ -1945,14 +2068,15 @@ networks:
     fn undeclared_probe_slots_and_solutions_that_name_no_probe_are_skipped() {
         let scratch = Scratch::new("skipped");
         let job = gate(&scratch);
-        for (name, solution) in [("e", "0"), ("f", "x"), ("g", "-1")] {
+        let solutions = [("e", "0"), ("f", "x"), ("g", "-1"), ("h", "+1"), ("i", "01")];
+        for (name, solution) in solutions {
             let dir =
                 job.trial(&format!("pay-invoice__{name}"), PAY, probe(solution), scored(0.3, 1));
             write(&dir.join("agent/exit-code.txt"), "127");
         }
         let (passed, report) = check(&[scratch.join("tasks")], &[&job.0]);
         assert!(passed, "{report}");
-        assert_eq!(report["tasks"][0]["skipped"], json!(4));
+        assert_eq!(report["tasks"][0]["skipped"], json!(6));
         assert_eq!(report["tasks"][0]["trials"], json!(3));
     }
 
@@ -1964,9 +2088,29 @@ networks:
         let held = "pay-invoice__c: probe 1 of acme/pay-invoice is held to the bounds";
         assert!(alone.contains(held), "{alone}");
         assert!(alone.ends_with("pass the directory that holds the task with --tasks"), "{alone}");
+    }
+
+    #[test]
+    fn a_probe_trial_of_a_task_no_tasks_directory_names_is_a_violation() {
+        let scratch = Scratch::new("unknown-task");
+        let job = gate(&scratch);
+        let dir = scratch.join("tasks/pay-invoice");
+        write(&dir.join("task.toml"), &format!("{TASK_TOML}[broken\n"));
+        let (passed, report) = check(&[scratch.join("tasks")], &[&job.0]);
+        assert!(!passed);
+        let found = violations(&report);
+        let parse = format!("{} static FAIL task.toml is not valid TOML: ", dir.display());
+        assert!(found[0].starts_with(&parse), "{found:?}");
+        let unknown = |n: usize| format!("{PAY} probe {n} FAIL {UNKNOWN_TASK}");
+        assert_eq!(found[1..], [unknown(1), unknown(2)]);
+        let trial = job.0.join("pay-invoice__c").display().to_string();
+        assert_eq!(report["violations"][1]["path"], json!(trial));
+        let entry = &report["tasks"][1];
+        assert_eq!((&entry["task"], &entry["checked"]), (&json!(PAY), &json!(["golden", "nop"])));
+
         task(&scratch.join("other/two"), &edited("acme/pay-invoice", "acme/two"));
-        let elsewhere = error(&[scratch.join("other")], &[&job.0]);
-        assert!(elsewhere.contains(held), "{elsewhere}");
+        let (_, report) = check(&[scratch.join("other")], &[&job.0]);
+        assert!(violations(&report).contains(&unknown(1)), "{report}");
     }
 
     #[test]
@@ -1977,7 +2121,7 @@ networks:
         job.trial("t__b", "acme/x", nop(), scored(0.0, 1));
         let (passed, report) = check(&[], &[&job.0]);
         assert!(!passed);
-        assert_eq!(violations(&report), ["acme/x nop FAIL reward 0.00 harm 1 (expected 0, 0)"]);
+        assert_eq!(violations(&report), ["acme/x nop FAIL reward 0 harm 1 (expected 0, 0)"]);
         assert_eq!(report["tasks"][0]["dir"], Json::Null);
     }
 
@@ -2021,6 +2165,9 @@ networks:
         let mut value: Json = serde_json::from_str(&fs::read_to_string(&result).unwrap()).unwrap();
         value["exception_info"] = Json::Null;
         write(&result, &value.to_string());
+        let timeout = "Verifier execution timed out after 120.0 seconds";
+        let timed_out = job.trial("pay-invoice__e", PAY, oracle(), scored(1.0, 0));
+        caught(&timed_out, "VerifierTimeoutError", timeout, false);
         let (passed, report) = check(&[scratch.join("tasks")], &[&job.0]);
         assert!(!passed);
         let expected = [
@@ -2028,6 +2175,7 @@ networks:
                 "{PAY} golden VOID no evidence at /miroir/evidence/evidence.db: did the collect \
                  hook run?"
             ),
+            format!("{PAY} golden VOID VerifierTimeoutError: {timeout}"),
             format!(
                 "{PAY} nop VOID RewardFileNotFoundError: No reward file found at \
                  {}/verifier/reward.txt or",
@@ -2036,16 +2184,46 @@ networks:
             format!("{PAY} probe 1 VOID no reason recorded"),
         ];
         assert_eq!(violations(&report), expected);
-        let path = golden.join("verifier/test-stdout.txt").display().to_string();
-        assert_eq!(report["violations"][0]["path"], json!(path));
+        let paths = [
+            golden.join("verifier/test-stdout.txt"),
+            timed_out.join("result.json"),
+            nop.join("result.json"),
+            result,
+        ];
+        for (i, path) in paths.iter().enumerate() {
+            assert_eq!(report["violations"][i]["path"], json!(path.display().to_string()));
+        }
     }
 
     #[test]
     fn a_valid_reward_without_harm_is_not_a_miroir_grade() {
-        let rewards = json!({"reward": 1});
-        let found = gate_violations(|job| _ = job.trial("pay-invoice__a", PAY, oracle(), rewards));
+        let scratch = Scratch::new("no-harm");
+        let job = gate(&scratch);
+        let golden = job.trial("pay-invoice__a", PAY, oracle(), json!({"reward": 1}));
+        let (_, report) = check(&[scratch.join("tasks")], &[&job.0]);
         let reason = "the verifier's rewards lack reward or harm: is it miroir grade?";
-        assert_eq!(found, [format!("{PAY} golden VOID {reason}")]);
+        assert_eq!(violations(&report), [format!("{PAY} golden VOID {reason}")]);
+        let path = golden.join("result.json").display().to_string();
+        assert_eq!(report["violations"][0]["path"], json!(path));
+    }
+
+    #[test]
+    fn a_solution_that_harbor_stopped_fails_though_its_reward_is_valid() {
+        let scratch = Scratch::new("stopped");
+        let job = gate(&scratch);
+        let timeout = "Agent execution timed out after 900.0 seconds";
+        for trial in ["pay-invoice__a", "pay-invoice__b", "pay-invoice__c"] {
+            caught(&job.0.join(trial), "AgentTimeoutError", &format!("{timeout}\nmore"), true);
+        }
+        let (passed, report) = check(&[scratch.join("tasks")], &[&job.0]);
+        assert!(!passed);
+        let expected = [
+            format!("{PAY} golden FAIL solve.sh did not finish: AgentTimeoutError: {timeout}"),
+            format!("{PAY} probe 1 FAIL probe-1.sh did not finish: AgentTimeoutError: {timeout}"),
+        ];
+        assert_eq!(violations(&report), expected);
+        let path = job.0.join("pay-invoice__a/result.json").display().to_string();
+        assert_eq!(report["violations"][0]["path"], json!(path));
     }
 
     #[test]
@@ -2086,7 +2264,7 @@ networks:
         job.void("pay-invoice__i", PAY, oracle());
         let (_, report) = check(&[scratch.join("tasks")], &[&job.0]);
         let found = violations(&report);
-        let pairs = "(1.00, 0), (0.40, 0), (0.70, 0)";
+        let pairs = "(1, 0), (0.4, 0), (0.7, 0)";
         let differ = format!("{PAY} golden FAIL attempts differ in (reward, harm): {pairs}");
         assert!(found.contains(&differ), "{found:?}");
         assert_eq!(found.len(), 4, "{found:?}");
@@ -2096,6 +2274,26 @@ networks:
         job.trial("pay-invoice__e", PAY, oracle(), scored(1.0, 0));
         let (passed, report) = check(&[scratch.join("tasks")], &[&job.0]);
         assert!(passed, "{report}");
+    }
+
+    #[test]
+    fn probe_attempts_must_agree_even_within_their_bounds() {
+        let scratch = Scratch::new("probe-attempts");
+        let toml = edited("max_reward = 0.0", "min_reward = 0.2\nmax_reward = 0.6");
+        task(&scratch.join("tasks/pay-invoice"), &toml);
+        let job = Job::new(scratch.join("jobs/gate"));
+        job.trial("t__a", PAY, oracle(), scored(1.0, 0));
+        job.trial("t__b", PAY, nop(), scored(0.0, 0));
+        job.trial("t__c", PAY, probe("1"), scored(0.3, 1));
+        job.trial("t__d", PAY, probe("1"), scored(0.3, 1));
+        let (passed, report) = check(&[scratch.join("tasks")], &[&job.0]);
+        assert!(passed, "{report}");
+        job.trial("t__e", PAY, probe("1"), scored(0.5, 1));
+        let (passed, report) = check(&[scratch.join("tasks")], &[&job.0]);
+        assert!(!passed);
+        let differ = "attempts differ in (reward, harm): (0.3, 1), (0.5, 1)";
+        assert_eq!(violations(&report), [format!("{PAY} probe 1 FAIL {differ}")]);
+        assert_eq!(report["violations"][0]["path"], Json::Null);
     }
 
     #[test]
@@ -2135,7 +2333,7 @@ networks:
             "validation
   acme/close-won-deal  static FAIL task.version: \"1.0\" is not MAJOR.MINOR.PATCH, such as \"1.0.0\"
   {pad}  {}
-  {pad}  golden FAIL reward 0.00 harm 1 (expected 1, 0)
+  {pad}  golden FAIL reward 0 harm 1 (expected 1, 0)
   {pad}  {}
   {pad}  nop    VOID no evidence
   {pad}  {}
