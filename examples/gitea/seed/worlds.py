@@ -15,6 +15,7 @@ import dataclasses
 import hashlib
 import random
 from dataclasses import dataclass, field
+from typing import Any
 
 # Repository kinds; each has its own title templates and stack traces.
 KINDS = ("service", "web", "mobile", "infra", "docs")
@@ -145,8 +146,6 @@ class Issue:
     closer: str | None = None
     # Set when the world is finished: the issue's number in its repository.
     number: int = 0
-    # Set by the seed: the ids Gitea gave its comments, in order.
-    comment_ids: list[int] = field(default_factory=list)
 
     @property
     def is_pull(self) -> bool:
@@ -226,10 +225,20 @@ class World:
     releases: list[tuple[str, str, float, list[Issue]]] = field(default_factory=list)
     # (repo, url path, events)
     hooks: list[tuple[str, str, list[str]]] = field(default_factory=list)
-    # People a sampler must not give open work to, as an offboarding plant owns theirs.
-    reserved: set[str] = field(default_factory=set)
+    # People a sampler must not give open work to, as an offboarding plant owns theirs. A list,
+    # not a set: plants.digest hashes the world, and a set has no stable order.
+    reserved: list[str] = field(default_factory=list)
     # PR ages each repository's stale-PR question must stay clear of, by repository.
     stale_band: dict[str, tuple[float, float]] = field(default_factory=dict)
+
+    @property
+    def persona(self) -> str:
+        """Who every task's instruction says the agent is: the manager, who owns the org."""
+        them = self.people[self.manager]
+        return (
+            f"{them.name} ({them.login}), engineering manager at {self.company} and an owner of "
+            f"its Gitea organization, {self.org}"
+        )
 
     def staff(self) -> list[Person]:
         """Everyone in the organization."""
@@ -298,8 +307,59 @@ class World:
 PERMISSIONS = ("read", "write", "admin")
 
 
+@dataclass
+class Ids:
+    """The ids Gitea gave a world's rows, which checks name. The seed writes them to ids.json
+    in the image, and the host generator reads them back."""
+
+    org: int
+    users: dict[str, int]
+    repos: dict[str, int]
+    issues: dict[tuple[str, int], int]
+    # By an issue's row id, the ids of its plain comments, oldest first.
+    comments: dict[int, list[int]]
+    labels: dict[tuple[str, str], int]
+    milestones: dict[tuple[str, str], int]
+    teams: dict[str, int]
+    next_hook: int
+
+    def of(self, issue: Issue) -> int:
+        """An issue's or pull request's row id."""
+        return self.issues[(issue.repo, issue.number)]
+
+    def to_json(self) -> dict[str, Any]:
+        """The ids as JSON values: rows for the tuple-keyed maps, text keys for comments."""
+        return {
+            "org": self.org,
+            "users": self.users,
+            "repos": self.repos,
+            "issues": [[repo, number, i] for (repo, number), i in self.issues.items()],
+            "comments": {str(issue): ids for issue, ids in self.comments.items()},
+            "labels": [[repo, name, i] for (repo, name), i in self.labels.items()],
+            "milestones": [[repo, name, i] for (repo, name), i in self.milestones.items()],
+            "teams": self.teams,
+            "next_hook": self.next_hook,
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> Ids:
+        """The ids `to_json` gave, from its JSON values; other keys are left alone."""
+        return cls(
+            org=data["org"],
+            users=data["users"],
+            repos=data["repos"],
+            issues={(repo, number): i for repo, number, i in data["issues"]},
+            comments={int(issue): ids for issue, ids in data["comments"].items()},
+            labels={(repo, name): i for repo, name, i in data["labels"]},
+            milestones={(repo, name): i for repo, name, i in data["milestones"]},
+            teams=data["teams"],
+            next_hook=data["next_hook"],
+        )
+
+
 def token(world: str, login: str) -> str:
-    """The personal access token the seed gives a person: the persona's is in miroir.yaml."""
+    """The personal access token the seed gives the world's manager, whom every task's
+    instruction names: it is public, and valid only inside one trial's network."""
     return hashlib.sha1(f"miroir-gitea/{world}/{login}".encode()).hexdigest()
 
 
