@@ -1,4 +1,14 @@
-FROM scratch
+# syntax=docker/dockerfile:1
+# Dockerfile's miroir stage, from the static binaries the release workflow builds
+# (dist/miroir-amd64, dist/miroir-arm64) instead of a build stage.
+FROM alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f AS miroir
+RUN apk add --no-cache bash
 ARG TARGETARCH
-COPY dist/miroir-${TARGETARCH} /miroir
-ENTRYPOINT ["/miroir"]
+COPY dist/miroir-${TARGETARCH} /usr/local/bin/miroir
+COPY --chmod=0755 <<'EOF' /tests/test.sh
+#!/bin/bash
+exec miroir grade
+EOF
+WORKDIR /tests
+# Harbor's keepalive ignores SIGTERM; nothing in this container needs a graceful stop.
+STOPSIGNAL SIGKILL
