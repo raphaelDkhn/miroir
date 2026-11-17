@@ -151,9 +151,29 @@ pub fn sql_literal(value: &Value) -> String {
         Value::Bool(true) => "1".into(),
         Value::Bool(false) => "0".into(),
         Value::Number(number) => number.to_string(),
-        Value::String(text) => quoted(text),
-        Value::Array(_) | Value::Object(_) => quoted(&value.to_string()),
+        Value::String(text) => text_literal(text),
+        Value::Array(_) | Value::Object(_) => text_literal(&value.to_string()),
     }
+}
+
+/// `text` as a SQLite expression with no three `'` in a row, which the TOML literal string a spec
+/// is pasted into (`MIROIR_SPEC = '''…'''`) cannot hold: a quoted literal, or, where doubling its
+/// quotes would make such a run, its pieces joined by `char(39)`.
+fn text_literal(text: &str) -> String {
+    let literal = quoted(text);
+    if !literal.contains("'''") {
+        return literal;
+    }
+    let mut parts = Vec::new();
+    for (n, piece) in text.split('\'').enumerate() {
+        if n > 0 {
+            parts.push("char(39)".to_owned());
+        }
+        if !piece.is_empty() {
+            parts.push(quoted(piece));
+        }
+    }
+    format!("({})", parts.join(" || "))
 }
 
 /// `text` as normalized ids (§4.4), or `None` when it holds no id or a token outside
@@ -1960,11 +1980,28 @@ allow:
             (json!(18_446_744_073_709_551_615_u64), "18446744073709551615"),
             (json!(1.5), "1.5"),
             (json!("it's"), "'it''s'"),
+            (json!("Renamed to 'Q4 plan'"), "('Renamed to ' || char(39) || 'Q4 plan' || char(39))"),
+            (json!("a''b"), "('a' || char(39) || char(39) || 'b')"),
+            (json!("'"), "(char(39))"),
             (json!([1, "a"]), r#"'[1,"a"]'"#),
             (json!({"b": "it's", "a": 1}), r#"'{"a":1,"b":"it''s"}'"#),
         ];
         for (value, literal) in cases {
             assert_eq!(sql_literal(&value), literal, "{value}");
+        }
+    }
+
+    #[tokio::test]
+    async fn text_literals_hold_no_three_quotes_and_read_back_as_their_text() {
+        let mut conn =
+            <SqliteConnection as sqlx::Connection>::connect("sqlite::memory:").await.unwrap();
+        for text in ["", "'", "''", "'''", "a'", "'a", "a''b", "it's", "'Q4 plan'", "''''x'"] {
+            let literal = sql_literal(&json!(text));
+            assert!(!literal.contains("'''"), "{literal}");
+            let sql = AssertSqlSafe(format!("SELECT {literal} = ?1, typeof({literal})"));
+            let (equal, kind): (bool, String) =
+                sqlx::query_as(sql).bind(text).fetch_one(&mut conn).await.unwrap();
+            assert!(equal && kind == "text", "{text:?} as {literal}");
         }
     }
 

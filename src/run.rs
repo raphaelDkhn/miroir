@@ -212,7 +212,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_image_never_baked_does_not_boot() {
-        let paths = Paths::new(temp_root("unbaked"));
+        let root = temp_root("unbaked");
+        let paths = Paths::new(&*root);
         let error = run(&paths, &manifest()).await.unwrap_err();
         assert_eq!(
             error.to_string(),
@@ -223,9 +224,10 @@ mod tests {
 
     #[tokio::test]
     async fn an_unreadable_bake_json_names_the_file_and_the_fix() {
-        let garbled = Paths::new(temp_root("garbled"));
+        let roots = [temp_root("garbled"), temp_root("directory")];
+        let garbled = Paths::new(&*roots[0]);
         std::fs::write(garbled.bake_info(), "{\"baked_at\": 1}").unwrap();
-        let directory = Paths::new(temp_root("directory"));
+        let directory = Paths::new(&*roots[1]);
         std::fs::create_dir(directory.bake_info()).unwrap();
         for paths in [garbled, directory] {
             let error = run(&paths, &manifest()).await.unwrap_err().to_string();
@@ -238,7 +240,8 @@ mod tests {
 
     #[test]
     fn a_bake_json_reads_back_as_written() {
-        let paths = Paths::new(temp_root("bake-json"));
+        let root = temp_root("bake-json");
+        let paths = Paths::new(&*root);
         let baked_at: Timestamp = "2026-11-17T10:00:00Z".parse().unwrap();
         let info = BakeInfo { baked_at, miroir: "0.1.0".into() };
         std::fs::write(paths.bake_info(), serde_json::to_vec(&info).unwrap()).unwrap();
@@ -248,7 +251,8 @@ mod tests {
 
     #[test]
     fn a_stale_run_dir_is_replaced_by_an_empty_private_one() {
-        let dir = temp_root("stale").join("run");
+        let root = temp_root("stale");
+        let dir = root.join("run");
         std::fs::create_dir_all(dir.join("nested")).unwrap();
         std::fs::write(dir.join("ready"), "").unwrap();
         std::fs::write(dir.join("nested").join("effects.jsonl"), "{}\n").unwrap();
@@ -259,7 +263,8 @@ mod tests {
 
     #[test]
     fn a_missing_run_dir_is_made_private() {
-        let dir = temp_root("missing").join("run");
+        let root = temp_root("missing");
+        let dir = root.join("run");
         fresh_run_dir(&dir).unwrap();
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         assert_eq!(mode(&dir), 0o700);
@@ -267,7 +272,8 @@ mod tests {
 
     #[test]
     fn a_run_path_that_is_a_file_is_an_error_not_a_missing_directory() {
-        let file = temp_root("file").join("run");
+        let root = temp_root("file");
+        let file = root.join("run");
         std::fs::write(&file, "").unwrap();
         assert!(remove_dir(&file).is_err());
         assert!(fresh_run_dir(&file).is_err());

@@ -199,20 +199,37 @@ fn failed(step: u8, at: impl Display, error: impl Display) -> anyhow::Error {
 #[cfg(test)]
 pub(crate) mod tests {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::*;
     use crate::manifest::{Database, DbTime};
     use crate::pg::{Column, ColumnKind};
 
+    /// A directory under the temp directory, removed with what it holds when dropped.
+    pub(crate) struct TempRoot(PathBuf);
+
+    impl std::ops::Deref for TempRoot {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// A new, empty directory under the temp directory.
-    pub(crate) fn temp_root(name: &str) -> PathBuf {
+    pub(crate) fn temp_root(name: &str) -> TempRoot {
         let nanos =
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let dir = std::env::temp_dir()
             .join(format!("miroir-world-{name}-{}-{nanos}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
-        dir
+        TempRoot(dir)
     }
 
     /// A manifest with no process, sink or command.
@@ -325,7 +342,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn an_image_baked_once_is_not_baked_again() {
-        let paths = Paths::new(temp_root("baked"));
+        let root = temp_root("baked");
+        let paths = Paths::new(&*root);
         std::fs::write(paths.bake_info(), "{}").unwrap();
         let error = bake(&paths, &manifest()).await.unwrap_err().to_string();
         let file = paths.bake_info().display().to_string();
@@ -337,7 +355,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_capture_after_the_bake_began_fails_before_anything_starts() {
-        let paths = Paths::new(temp_root("future"));
+        let root = temp_root("future");
+        let paths = Paths::new(&*root);
         let mut manifest = manifest();
         manifest.database.time.captured = Some(at("2999-01-01T00:00:00Z"));
         let error = bake(&paths, &manifest).await.unwrap_err().to_string();
@@ -348,7 +367,7 @@ pub(crate) mod tests {
     #[test]
     fn finishing_records_the_bake_and_makes_the_root_private() {
         let root = temp_root("finish");
-        let paths = Paths::new(&root);
+        let paths = Paths::new(&*root);
         std::fs::create_dir_all(paths.run_dir().join("nested")).unwrap();
         std::fs::write(paths.ready(), "").unwrap();
         let started = at("2026-11-17T10:00:00Z");
@@ -358,14 +377,15 @@ pub(crate) mod tests {
         assert_eq!((info.baked_at, info.miroir.as_str()), (started, env!("CARGO_PKG_VERSION")));
         assert_eq!(std::fs::read_dir(paths.evidence_dir()).unwrap().count(), 0);
         assert!(!paths.run_dir().exists(), "no runtime state in the image");
-        let mode = std::fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+        let mode = std::fs::metadata(&*root).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
         finish(&paths, started).unwrap();
     }
 
     #[test]
     fn a_failed_finish_names_the_step_and_the_file() {
-        let paths = Paths::new(temp_root("gone").join("missing"));
+        let root = temp_root("gone");
+        let paths = Paths::new(root.join("missing"));
         let error = finish(&paths, at("2026-11-17T10:00:00Z")).unwrap_err().to_string();
         let file = paths.bake_info().display().to_string();
         assert!(error.starts_with(&format!("bake step 11, {file}: ")), "{error}");
