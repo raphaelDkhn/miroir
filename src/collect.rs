@@ -51,8 +51,7 @@ pub async fn collect(paths: &Paths, manifest: &Manifest) -> anyhow::Result<Summa
     let (effects, oversized) = read_effects(&paths.effects())?;
     let faults = journal::read(&paths.faults())
         .with_context(|| format!("cannot read {}", paths.faults().display()))?;
-    let mut evidence = assemble(Reads { boot, ignore, quiet, snapshot, effects, faults })?;
-    evidence.faults.extend(oversized);
+    let evidence = assemble(Reads { boot, ignore, quiet, snapshot, effects, oversized, faults })?;
     persist(&paths.evidence(), evidence).await
 }
 
@@ -102,14 +101,17 @@ struct Reads {
     snapshot: Result<Snapshot, PgError>,
     /// The lines of `effects.jsonl`.
     effects: Vec<Value>,
+    /// The fault that left `effects.jsonl` unread, when it was over the evidence budget.
+    oversized: Option<Fault>,
     /// The lines of `faults.jsonl`.
     faults: Vec<Value>,
 }
 
-/// The evidence of `reads`. Its faults are the journal's, then collect's own: a failed quiet,
-/// then a snapshot that failed, which leaves no changes. A fold error is Miroir's own failure.
+/// The evidence of `reads`. Its faults are the journal's, then collect's own: a failed quiet, a
+/// snapshot that failed, which leaves no changes, then an effects journal left unread. A fold
+/// error is Miroir's own failure.
 fn assemble(reads: Reads) -> anyhow::Result<Evidence> {
-    let Reads { boot, ignore, quiet, snapshot, effects, faults: lines } = reads;
+    let Reads { boot, ignore, quiet, snapshot, effects, oversized, faults: lines } = reads;
     let mut faults = Vec::new();
     for (line, value) in (1_usize..).zip(lines) {
         let fault = serde_json::from_value(value)
@@ -136,6 +138,7 @@ fn assemble(reads: Reads) -> anyhow::Result<Evidence> {
             Vec::new()
         }
     };
+    faults.extend(oversized);
     let tables = captured(&boot, &ignore);
     Ok(Evidence { miroir: env!("CARGO_PKG_VERSION").into(), tables, changes, effects, faults })
 }
@@ -274,6 +277,7 @@ mod tests {
             quiet,
             snapshot,
             effects: Vec::new(),
+            oversized: None,
             faults: Vec::new(),
         }
     }
@@ -402,10 +406,22 @@ mod tests {
             json!({"kind": "crash", "detail": "worker exited with status 1"}),
             json!({"kind": "sink", "detail": "POST /hooks: a body over 25 MiB"}),
         ];
+        let unread = "effects.jsonl took 16777217 bytes".to_string();
+        reads.oversized = Some(Fault { kind: fault::EVIDENCE_BUDGET.into(), detail: unread });
         let evidence = assemble(reads).unwrap();
         let kinds: Vec<&str> = evidence.faults.iter().map(|fault| fault.kind.as_str()).collect();
-        assert_eq!(kinds, [fault::CRASH, fault::SINK, fault::QUIET_TIMEOUT, fault::LOG_BUDGET]);
+        assert_eq!(
+            kinds,
+            [
+                fault::CRASH,
+                fault::SINK,
+                fault::QUIET_TIMEOUT,
+                fault::LOG_BUDGET,
+                fault::EVIDENCE_BUDGET
+            ]
+        );
         assert_eq!(evidence.faults[1].detail, "POST /hooks: a body over 25 MiB");
+        assert_eq!(evidence.faults[4].detail, "effects.jsonl took 16777217 bytes");
     }
 
     #[test]
