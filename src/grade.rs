@@ -120,17 +120,27 @@ pub fn allow_line(
         let names: Vec<String> = columns.iter().map(|column| yaml_name(column)).collect();
         fields.push(format!("columns: [{}]", names.join(", ")));
     }
-    if !key.is_empty() {
-        let terms: Vec<String> = key
-            .iter()
-            .map(|(column, value)| match value {
-                Value::Null => format!("{} IS NULL", sql_name(column)),
-                value => format!("{} = {}", sql_name(column), sql_literal(value)),
-            })
-            .collect();
-        fields.push(format!("where: {}", Value::from(terms.join(" AND "))));
+    if let Some(condition) = key_condition(key) {
+        fields.push(format!("where: {}", Value::from(condition)));
     }
     format!("- {{{}}}", fields.join(", "))
+}
+
+/// The SQLite condition `key` describes: `column = value` for each entry (`column IS NULL` for a
+/// null) joined with `AND`, column names quoted where SQLite would misread them; `None` when
+/// `key` is empty. The `where` of [`allow_line`], and `miroir draft`'s row equality in checks.
+pub fn key_condition(key: &Map<String, Value>) -> Option<String> {
+    if key.is_empty() {
+        return None;
+    }
+    let terms: Vec<String> = key
+        .iter()
+        .map(|(column, value)| match value {
+            Value::Null => format!("{} IS NULL", sql_name(column)),
+            value => format!("{} = {}", sql_name(column), sql_literal(value)),
+        })
+        .collect();
+    Some(terms.join(" AND "))
 }
 
 /// A SQLite literal for a JSON value, as allow lines and `miroir draft` write it in SQL. The one
