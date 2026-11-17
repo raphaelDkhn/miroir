@@ -11,6 +11,7 @@ mod db;
 mod edb;
 mod env;
 mod episode;
+mod export;
 mod grade;
 mod import;
 mod manifest;
@@ -67,6 +68,9 @@ enum Command {
     Sandbox,
     /// Scrub production database dumps, and agent traces, into seed data.
     Import(import::Args),
+    /// Write the tasks for another harness to run.
+    #[command(subcommand)]
+    Export(export::Format),
 }
 
 #[tokio::main]
@@ -97,6 +101,7 @@ async fn dispatch(command: Command) -> anyhow::Result<()> {
             tracing::info!(out = %args.out.display(), "import finished");
             Ok(())
         }
+        Command::Export(export::Format::Harbor(args)) => export::harbor(&args),
     }
 }
 
@@ -167,14 +172,29 @@ fn port() -> anyhow::Result<u16> {
     }
 }
 
-fn bearer_token() -> anyhow::Result<Option<String>> {
-    match std::env::var("MIROIR_TOKEN") {
+fn token_var(name: &str) -> anyhow::Result<Option<String>> {
+    match std::env::var(name) {
         Ok(token) if !token.is_empty() => Ok(Some(token)),
         Err(std::env::VarError::NotPresent) => Ok(None),
-        _ => Err(anyhow::anyhow!(
-            "MIROIR_TOKEN must not be empty; set it to a token, or unset it to serve without one"
-        )),
+        _ => Err(anyhow::anyhow!("{name} must not be empty; set it to a token, or unset it")),
     }
+}
+
+/// `MIROIR_TOKEN`, which opens every route, and `MIROIR_AGENT_TOKEN`, which opens `/mcp`
+/// alone.
+fn bearer_tokens() -> anyhow::Result<(Option<String>, Option<String>)> {
+    let token = token_var("MIROIR_TOKEN")?;
+    let agent_token = token_var("MIROIR_AGENT_TOKEN")?;
+    if agent_token.is_some() && token.is_none() {
+        anyhow::bail!(
+            "MIROIR_AGENT_TOKEN keeps an agent to /mcp only if MIROIR_TOKEN guards the other \
+             routes; set MIROIR_TOKEN too"
+        );
+    }
+    if agent_token.is_some() && agent_token == token {
+        anyhow::bail!("MIROIR_AGENT_TOKEN must differ from MIROIR_TOKEN, which opens every route");
+    }
+    Ok((token, agent_token))
 }
 
 async fn warn_if_online() {
@@ -201,14 +221,14 @@ async fn run() -> anyhow::Result<()> {
         .context("cannot start the sinks")?;
     serve_proxy(&env).await?;
     let port = port()?;
-    let token = bearer_token()?;
+    let (token, agent_token) = bearer_tokens()?;
     if token.is_none() {
         tracing::warn!(port, "MIROIR_TOKEN is not set, so anyone who can reach this port can act");
     }
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
         .with_context(|| format!("cannot listen on port {port}"))?;
-    let router = server::router(env.clone(), token);
+    let router = server::router(env.clone(), token, agent_token);
     let mut serving = tokio::spawn(server::serve(listener, router));
     tracing::info!(port, "serving OpenEnv");
     tokio::spawn(warn_if_online());

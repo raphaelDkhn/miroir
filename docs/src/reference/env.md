@@ -5,6 +5,7 @@
 | Variable | Read by | What |
 |---|---|---|
 | `MIROIR_TOKEN` | `run` | the bearer token every route but `/health` requires; unset, anyone can act |
+| `MIROIR_AGENT_TOKEN` | `run` | a second bearer token, which opens `/mcp` alone, for an agent that calls it itself; needs `MIROIR_TOKEN`, and must differ from it |
 | `MIROIR_PORT` | `run`, `sandbox` | the port to serve on; 8000 by default |
 | `MIROIR_SANDBOX` | `run`, `check` | `http://HOST:PORT` of a sandbox, which enables `run_code` |
 | `MIROIR_LOG_BUDGET_MB` | `run`, `check` | the change-log size past which an episode faults, shared by the databases; 1024 by default |
@@ -24,4 +25,4 @@
 | `MIROIR_POOL` | the `miroir pool` command | the pool's name, to label what it starts |
 
 Every process and command also gets the manifest's `env`, and a process its own `env`. None
-of them sees `MIROIR_TOKEN`.
+of them sees `MIROIR_TOKEN` or `MIROIR_AGENT_TOKEN`.

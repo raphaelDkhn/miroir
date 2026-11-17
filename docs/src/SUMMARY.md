@@ -31,6 +31,7 @@
 - [Serve an env](run/serve.md)
 - [Protocol](run/protocol.md)
 - [Pools](run/pool.md)
+- [Run in Harbor](run/harbor.md)
 
 # Train and evaluate
 

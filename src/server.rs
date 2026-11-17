@@ -1,9 +1,9 @@
-//! The HTTP server: `OpenEnv` over a WebSocket at `/ws`, MCP over JSON-RPC at `/mcp`, and
-//! the task listings, behind an optional bearer token.
+//! The HTTP server: `OpenEnv` over a WebSocket at `/ws`, MCP over JSON-RPC at `/mcp`, episodes
+//! over plain HTTP at `/episode`, and the task listings, behind an optional bearer token.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use axum::extract::Path;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -39,12 +39,19 @@ const MEND_BACKOFF_LIMIT: std::time::Duration = std::time::Duration::from_secs(3
 /// What an MCP client's model reads after the call that ended its episode.
 const LAST_CALL: &str = "That was the last tool call: the episode is over; stop calling tools.";
 
-/// Server state: the env, its bearer token, and the one session it serves at a time.
+/// Who holds the env: no one, a WebSocket session, or an episode `POST /episode` started.
+const FREE: u8 = 0;
+const SOCKET: u8 = 1;
+const HTTP: u8 = 2;
+
+/// Server state: the env, its bearer tokens, and who holds it.
 pub struct App {
     env: Arc<Env>,
     token: Option<String>,
+    /// Opens `/mcp` alone, so an agent given it can't start or end episodes.
+    agent_token: Option<String>,
     session_id: String,
-    session_taken: AtomicBool,
+    lease: AtomicU8,
     mcp_calls: Semaphore,
     schemas: Value,
 }
@@ -79,7 +86,7 @@ async fn mend(app: Arc<App>) {
     let mut wait = MEND_EVERY;
     loop {
         tokio::time::sleep(wait).await;
-        if app.session_taken.load(Ordering::SeqCst) {
+        if app.lease.load(Ordering::SeqCst) != FREE {
             continue;
         }
         wait = match app.env.mend().await {
@@ -93,7 +100,7 @@ async fn mend(app: Arc<App>) {
 }
 
 /// The env's routes; also starts the task that restores a broken env.
-pub fn router(env: Arc<Env>, token: Option<String>) -> Router {
+pub fn router(env: Arc<Env>, token: Option<String>, agent_token: Option<String>) -> Router {
     let schema = |text: &str| serde_json::from_str::<Value>(text).unwrap_or(Value::Null);
     let schemas = json!({
         "action": schema(include_str!("schemas/action.json")),
@@ -105,8 +112,9 @@ pub fn router(env: Arc<Env>, token: Option<String>) -> Router {
     let app = Arc::new(App {
         env,
         token,
+        agent_token,
         session_id: format!("miroir-{}", uuid::Uuid::new_v4()),
-        session_taken: AtomicBool::new(false),
+        lease: AtomicU8::new(FREE),
         mcp_calls: Semaphore::new(MCP_CALL_LIMIT),
         schemas,
     });
@@ -121,6 +129,8 @@ pub fn router(env: Arc<Env>, token: Option<String>) -> Router {
         )
         .route("/ws", get(websocket))
         .route("/mcp", post(mcp))
+        .route("/episode", post(start_episode))
+        .route("/episode/end", post(end_episode))
         .route(
             "/list_environments",
             get(|State(app): State<Arc<App>>| async move { Json(json!([app.env.manifest.name])) }),
@@ -143,16 +153,11 @@ async fn authorize(State(app): State<Arc<App>>, request: Request, next: Next) ->
         return (StatusCode::FORBIDDEN, refusal).into_response();
     }
     if let Some(token) = &app.token {
-        let sent = request.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
-        let expected = format!("Bearer {token}");
-        let in_header =
-            sent.is_some_and(|sent| constant_time_eq(sent.as_bytes(), expected.as_bytes()));
-        let in_url = request.uri().path() == "/mcp"
-            && Query::<McpQuery>::try_from_uri(request.uri())
-                .ok()
-                .and_then(|Query(query)| query.token)
-                .is_some_and(|sent| constant_time_eq(sent.as_bytes(), token.as_bytes()));
-        if !in_header && !in_url {
+        let mcp = request.uri().path() == "/mcp";
+        let agent = app.agent_token.as_deref().filter(|_| mcp);
+        let allowed = presents(&request, token, mcp)
+            || agent.is_some_and(|agent| presents(&request, agent, true));
+        if !allowed {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({"detail": "missing or wrong bearer token"})),
@@ -163,8 +168,22 @@ async fn authorize(State(app): State<Arc<App>>, request: Request, next: Next) ->
     next.run(request).await
 }
 
+/// Whether the request sends `token` as its bearer token, or as `?token=` where `in_url`.
+fn presents(request: &Request, token: &str, in_url: bool) -> bool {
+    let sent = request.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+    let expected = format!("Bearer {token}");
+    if sent.is_some_and(|sent| constant_time_eq(sent.as_bytes(), expected.as_bytes())) {
+        return true;
+    }
+    in_url
+        && Query::<McpQuery>::try_from_uri(request.uri())
+            .ok()
+            .and_then(|Query(query)| query.token)
+            .is_some_and(|sent| constant_time_eq(sent.as_bytes(), token.as_bytes()))
+}
+
 async fn health(State(app): State<Arc<App>>) -> (StatusCode, Json<Value>) {
-    let leased = app.session_taken.load(Ordering::SeqCst);
+    let leased = app.lease.load(Ordering::SeqCst) != FREE;
     let sandbox = match &app.env.sandbox {
         Some(sandbox) => sandbox.healthy().await,
         None => true,
@@ -208,6 +227,16 @@ async fn openapi(State(app): State<Arc<App>>) -> Json<Value> {
                  coworkers and coworker_reply frames of a client that answers for coworkers",
             ),
             "/mcp": route("post", "MCP over JSON-RPC"),
+            "/episode": route(
+                "post",
+                "Start an episode without a WebSocket: the reset frame's data; holds the env \
+                 until /episode/end",
+            ),
+            "/episode/end": route(
+                "post",
+                "End the episode /episode started, submitting if it still runs; returns its \
+                 record and frees the env",
+            ),
             "/list_environments": route("get", "This env's name"),
             "/{name}/splits": route("get", "The splits that have tasks"),
             "/{name}/tasks": route("post", "A split's tasks"),
@@ -233,11 +262,20 @@ async fn websocket(
         .on_upgrade(move |socket| session(socket, app, query.session_id))
 }
 
-struct SessionSlot<'a>(&'a AtomicBool);
+struct SessionSlot<'a>(&'a AtomicU8);
 
 impl Drop for SessionSlot<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        self.0.store(FREE, Ordering::SeqCst);
+    }
+}
+
+/// Why a session or an episode can't take the env from `holder`.
+fn held_by(holder: u8) -> &'static str {
+    if holder == HTTP {
+        "an episode started with POST /episode holds this env; POST /episode/end frees it"
+    } else {
+        "this env serves one session at a time; another connection holds it"
     }
 }
 
@@ -251,12 +289,12 @@ async fn session(mut socket: WebSocket, app: Arc<App>, session_id: Option<String
         refuse(socket, error_frame("CAPACITY_REACHED", "this env is shutting down")).await;
         return;
     }
-    if app.session_taken.swap(true, Ordering::SeqCst) {
-        let message = "this env serves one session at a time; another connection holds it";
-        refuse(socket, error_frame("CAPACITY_REACHED", message)).await;
+    let taken = app.lease.compare_exchange(FREE, SOCKET, Ordering::SeqCst, Ordering::SeqCst);
+    if let Err(holder) = taken {
+        refuse(socket, error_frame("CAPACITY_REACHED", held_by(holder))).await;
         return;
     }
-    let slot = SessionSlot(&app.session_taken);
+    let slot = SessionSlot(&app.lease);
     let mut queued = VecDeque::new();
     let mut pinged = false;
     loop {
@@ -568,6 +606,58 @@ fn rpc_error(id: &Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message, "data": null}})
 }
 
+/// Start an episode without a WebSocket, for harnesses whose agents speak MCP alone: the body
+/// is a reset frame's data, and the env stays held until `POST /episode/end`.
+async fn start_episode(State(app): State<Arc<App>>, body: axum::body::Bytes) -> HttpResult {
+    let body: &[u8] = if body.is_empty() { b"{}" } else { &body };
+    let args: ResetArgs = serde_json::from_slice(body)
+        .map_err(|e| http_error(StatusCode::BAD_REQUEST, &format!("bad reset data: {e}")))?;
+    if args.coworkers {
+        let message = "coworkers are answered over the WebSocket only; reset their tasks there";
+        return Err(http_error(StatusCode::BAD_REQUEST, message));
+    }
+    if app.env.stopping() {
+        return Err(http_error(StatusCode::SERVICE_UNAVAILABLE, "this env is shutting down"));
+    }
+    app.lease
+        .compare_exchange(FREE, HTTP, Ordering::SeqCst, Ordering::SeqCst)
+        .map_err(|holder| http_error(StatusCode::CONFLICT, held_by(holder)))?;
+    match app.env.reset(args).await {
+        Ok(mut started) => {
+            started["episode_id"] = app.env.state().await["episode_id"].clone();
+            Ok(Json(started))
+        }
+        Err(e) => {
+            app.lease.store(FREE, Ordering::SeqCst);
+            Err(http_error(env_status(&e), &e.to_string()))
+        }
+    }
+}
+
+/// End the episode `POST /episode` started, submitting for the agent if it still runs, as the
+/// Python client's `finish()` does; answers its record, and frees the env.
+async fn end_episode(State(app): State<Arc<App>>) -> HttpResult {
+    let holder = app.lease.load(Ordering::SeqCst);
+    if holder != HTTP {
+        let message = if holder == SOCKET {
+            "a WebSocket session holds this env, and ends its own episodes"
+        } else {
+            "no episode started with POST /episode is running"
+        };
+        return Err(http_error(StatusCode::CONFLICT, message));
+    }
+    let record = app.env.end().await.map_err(|e| http_error(env_status(&e), &e.to_string()))?;
+    app.lease.store(FREE, Ordering::SeqCst);
+    Ok(Json(record))
+}
+
+fn env_status(e: &EnvError) -> StatusCode {
+    match e {
+        EnvError::Invalid(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
 #[derive(Deserialize)]
 struct SplitRequest {
     split: String,
@@ -576,9 +666,9 @@ struct SplitRequest {
     stop: Option<usize>,
 }
 
-type TaskApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
+type HttpResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
-fn task_api_error(status: StatusCode, detail: &str) -> (StatusCode, Json<Value>) {
+fn http_error(status: StatusCode, detail: &str) -> (StatusCode, Json<Value>) {
     (status, Json(json!({"detail": detail})))
 }
 
@@ -588,13 +678,10 @@ fn split_tasks<'a>(
     split: &str,
 ) -> Result<Vec<&'a Task>, (StatusCode, Json<Value>)> {
     if !name.eq_ignore_ascii_case(&app.env.manifest.name) {
-        return Err(task_api_error(
-            StatusCode::NOT_FOUND,
-            &format!("unknown environment '{name}'"),
-        ));
+        return Err(http_error(StatusCode::NOT_FOUND, &format!("unknown environment '{name}'")));
     }
     if !SPLITS.contains(&split) {
-        return Err(task_api_error(StatusCode::BAD_REQUEST, &format!("unknown split '{split}'")));
+        return Err(http_error(StatusCode::BAD_REQUEST, &format!("unknown split '{split}'")));
     }
     Ok(app.env.tasks.iter().filter(|t| t.split == split).collect())
 }
@@ -615,7 +702,7 @@ fn task_json(env: &Env, task: &Task) -> Value {
     coworker_names(listed, task)
 }
 
-async fn splits(State(app): State<Arc<App>>, Path(name): Path<String>) -> TaskApiResult {
+async fn splits(State(app): State<Arc<App>>, Path(name): Path<String>) -> HttpResult {
     let mut found = Vec::new();
     for split in SPLITS {
         if !split_tasks(&app, &name, split)?.is_empty() {
@@ -629,7 +716,7 @@ async fn tasks(
     State(app): State<Arc<App>>,
     Path(name): Path<String>,
     Json(request): Json<SplitRequest>,
-) -> TaskApiResult {
+) -> HttpResult {
     let tasks: Vec<Value> = split_tasks(&app, &name, &request.split)?
         .into_iter()
         .map(|t| task_json(&app.env, t))
@@ -641,7 +728,7 @@ async fn num_tasks(
     State(app): State<Arc<App>>,
     Path(name): Path<String>,
     Json(request): Json<SplitRequest>,
-) -> TaskApiResult {
+) -> HttpResult {
     Ok(Json(json!({"num_tasks": split_tasks(&app, &name, &request.split)?.len()})))
 }
 
@@ -649,11 +736,10 @@ async fn task(
     State(app): State<Arc<App>>,
     Path(name): Path<String>,
     Json(request): Json<SplitRequest>,
-) -> TaskApiResult {
+) -> HttpResult {
     let tasks = split_tasks(&app, &name, &request.split)?;
     let found = request.index.and_then(|i| tasks.get(i));
-    let task =
-        found.ok_or_else(|| task_api_error(StatusCode::BAD_REQUEST, "Invalid task index"))?;
+    let task = found.ok_or_else(|| http_error(StatusCode::BAD_REQUEST, "Invalid task index"))?;
     Ok(Json(json!({"task": task_json(&app.env, task)})))
 }
 
@@ -661,7 +747,7 @@ async fn task_range(
     State(app): State<Arc<App>>,
     Path(name): Path<String>,
     Json(request): Json<SplitRequest>,
-) -> TaskApiResult {
+) -> HttpResult {
     let tasks = split_tasks(&app, &name, &request.split)?;
     let stop = request.stop.unwrap_or(tasks.len()).min(tasks.len());
     let start = request.start.unwrap_or(0).min(stop);

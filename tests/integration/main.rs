@@ -6,6 +6,7 @@ mod clock;
 mod code;
 mod common;
 mod coworkers;
+mod export;
 mod grade;
 mod import;
 mod mcp;

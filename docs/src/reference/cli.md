@@ -12,11 +12,15 @@ the host.
 | `miroir check` | checks that the env and its tasks grade reliably. See [Check the env](../make/check.md) |
 | `miroir sandbox` | serves the sandbox that runs the agent's code, in a container of its own |
 | `miroir import` | scrubs production dumps and traces into seed data. See [Import](../production/import.md) |
+| `miroir export harbor` | writes each task as a Harbor task. See [Run in Harbor](../run/harbor.md) |
 
 `check` takes `--json`, `--mutate` and `--world W`.
 
 `import` takes `--dump APP=FILE` (one per app), `--scrub FILE`, `--key FILE`, `--out DIR`
 and, optionally, `--traces FILE`.
+
+`export harbor` takes `--image IMAGE`, the env image as Harbor's Docker finds it, and
+`--out DIR`, empty or missing.
 
 `miroir --version` prints the version. Every command must run as the container's entrypoint,
 or as a child of its init.

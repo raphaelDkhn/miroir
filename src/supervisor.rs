@@ -54,8 +54,7 @@ struct Running {
     exited: watch::Receiver<Option<i32>>,
 }
 
-/// Runs the manifest's processes and commands, with its `env` and without
-/// `MIROIR_TOKEN`.
+/// Runs the manifest's processes and commands, with its `env` and without the bearer tokens.
 pub struct Supervisor {
     env: BTreeMap<String, String>,
     probe: reqwest::Client,
@@ -298,6 +297,7 @@ impl Supervisor {
             .args(args)
             .envs(&self.env)
             .env_remove("MIROIR_TOKEN")
+            .env_remove("MIROIR_AGENT_TOKEN")
             .stdin(Stdio::null())
             .stdout(std::io::stderr())
             .stderr(std::io::stderr())

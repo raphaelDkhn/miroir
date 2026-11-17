@@ -1,8 +1,9 @@
 # Protocol
 
 Clients drive episodes over a WebSocket at `/ws`, in [OpenEnv](https://github.com/openenv/OpenEnv)
-frames. Agents can also call the tools over MCP at `/mcp`. The
-[Python client](../train/client.md) does all of this for you.
+frames. Agents can also call the tools over MCP at `/mcp`, and a harness can start and end
+their episodes [over HTTP](#episodes-over-http). The [Python client](../train/client.md) speaks
+the WebSocket for you.
 
 ## Frames
 
@@ -112,6 +113,37 @@ model's answer back:
 | `episode_id` | the episode the calls are for |
 | `token` | the bearer token, for clients that can't send headers |
 
-MCP calls step the same episode as the WebSocket session, which still does the reset. A
-`tools/call` result is the step's observation, with MCP's `content` and `isError`, and `done`
-and `reward`.
+MCP calls step the same episode as the WebSocket session, or as `POST /episode`, which does
+the reset. A `tools/call` result is the step's observation, with MCP's `content` and
+`isError`, and `done` and `reward`.
+
+## Episodes over HTTP
+
+A harness whose agent speaks MCP alone, such as Claude Code or Codex, can run an episode with
+two HTTP requests in place of the WebSocket session:
+
+```sh
+curl -X POST http://127.0.0.1:8000/episode -H 'Authorization: Bearer secret' \
+  --json '{"task_id": "pay-invoice"}'
+# The agent works through http://127.0.0.1:8000/mcp ...
+curl -X POST http://127.0.0.1:8000/episode/end -H 'Authorization: Bearer secret'
+```
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST /episode` | a `reset` frame's `data`; empty draws a task | the reset's `observation`, `reward` and `done`, and the `episode_id` |
+| `POST /episode/end` | none | the episode's [record](../reference/results.md#record) |
+
+`POST /episode` holds the env as a session does: until `POST /episode/end`, `/health` says
+`leased`, and a second `POST /episode` or a WebSocket session is refused. `POST /episode/end`
+submits for the agent if the episode still runs, as the Python client's `finish()` does, then
+answers the record and frees the env. Unlike a session, which ends when its socket closes, the
+episode holds the env until someone ends it: a harness that stops first leaves it held, and
+`POST /episode/end` frees it. Tasks with coworkers need the WebSocket session, whose frames
+answer for them.
+
+Errors answer `{"detail": "..."}`: 400 for data the reset refuses, 409 when the env is held,
+or when no episode started over HTTP is running, and 500 when the reset or the end fails.
+
+Give the agent `MIROIR_AGENT_TOKEN`, not `MIROIR_TOKEN`: it opens `/mcp` alone, so the agent
+can't end its episode or start another. See [Serve an env](serve.md#security).

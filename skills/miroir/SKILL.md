@@ -17,7 +17,7 @@ Two programs are called `miroir`:
 
 | Program | Runs | Commands |
 |---|---|---|
-| Rust binary | inside the env image, as its entrypoint under `tini` | `bake`, `check`, `run`, `sandbox`, `import` |
+| Rust binary | inside the env image, as its entrypoint under `tini` | `bake`, `check`, `run`, `sandbox`, `import`, `export harbor` |
 | Python package | on the host | `pool`, `review`, `calibrate`, `draft`, `derive`; the `Session` client; TRL and verifiers adapters |
 
 Run the image's commands as `docker run --rm IMAGE COMMAND`. They refuse to run under
@@ -34,6 +34,7 @@ Install the Python package from PyPI with `uv pip install miroir`; the adapters 
 | add or fix tasks | [Write a task](#write-a-task) | `references/tasks.md` |
 | make `miroir check` pass | [The check loop](#the-check-loop) | `references/check.md` |
 | serve an env, play episodes, train or evaluate, review grades, calibrate | [Explore a running env](#explore-a-running-env) | `references/run-and-train.md` |
+| run the tasks in Harbor, with Claude Code, Codex or another agent | | `references/run-and-train.md`, "Harbor" |
 | seed from production dumps | | `references/manifest.md`, "Production dumps" |
 | turn production traces into tasks | | `references/tasks.md`, "Tasks from traces" |
 

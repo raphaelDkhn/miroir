@@ -26,7 +26,7 @@ pub fn docker_ok(args: &[&str]) -> String {
 
 const PID_LABEL: &str = "miroir-test-pid";
 
-fn pid_label() -> String {
+pub fn pid_label() -> String {
     format!("{PID_LABEL}={}", std::process::id())
 }
 

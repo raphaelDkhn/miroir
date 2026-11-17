@@ -705,3 +705,130 @@ async fn a_stopping_env_is_unhealthy_and_takes_no_new_session() {
     assert_eq!(refusal["data"]["code"], "CAPACITY_REACHED", "{refusal}");
     assert!(refusal["data"]["message"].as_str().unwrap().contains("shutting down"), "{refusal}");
 }
+
+async fn post(env: &Container, path: &str, token: Option<&str>, body: &Value) -> (u16, Value) {
+    let mut request = reqwest::Client::new().post(env.url(path)).json(body);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let reply = request.send().await.unwrap();
+    (reply.status().as_u16(), reply.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn an_episode_runs_over_plain_http_while_the_agent_works_over_mcp() {
+    let env = Container::start(&Options::default());
+    env.wait_healthy();
+    let (status, early) = post(&env, "/episode/end", None, &json!({})).await;
+    assert_eq!(status, 409, "{early}");
+    assert!(early["detail"].as_str().unwrap().contains("no episode started"), "{early}");
+
+    let start = json!({"task_id": "pay-invoice", "episode_id": "over-http"});
+    let (status, started) = post(&env, "/episode", None, &start).await;
+    assert_eq!(status, 200, "{started}");
+    assert_eq!(started["episode_id"], "over-http");
+    assert_eq!(started["observation"]["task_id"], "pay-invoice");
+    assert_eq!(get(&env.url("/health")).1, r#"{"leased":true,"status":"healthy"}"#);
+    let (status, again) = post(&env, "/episode", None, &start).await;
+    assert_eq!(status, 409, "{again}");
+    assert!(again["detail"].as_str().unwrap().contains("POST /episode/end frees it"), "{again}");
+    let mut socket = Session::connect(&env).await;
+    let refusal = socket.receive().await.expect("an error frame");
+    assert_eq!(refusal["data"]["code"], "CAPACITY_REACHED", "{refusal}");
+    assert!(refusal["data"]["message"].as_str().unwrap().contains("POST /episode"), "{refusal}");
+
+    let pay = json!({"name": "api_request",
+                     "arguments": {"method": "POST", "path": "/invoices/4001/pay"}});
+    let paid = mcp(&env, "tools/call", &pay).await;
+    assert_eq!(paid["result"]["isError"], false, "{paid}");
+    let (status, record) = post(&env, "/episode/end", None, &json!({})).await;
+    assert_eq!(status, 200, "{record}");
+    assert_eq!(record["episode_id"], "over-http");
+    assert_eq!(record["reward"], 1.0, "the agent never submitted; the end did: {record}");
+    assert_eq!(record["metadata"]["termination"], "submit", "{record}");
+    assert_eq!(record["actions"][1]["tool"], "submit", "{record}");
+    assert_eq!(get(&env.url("/health")).1, r#"{"leased":false,"status":"healthy"}"#);
+    let (status, _) = post(&env, "/episode/end", None, &json!({})).await;
+    assert_eq!(status, 409, "an episode ends once");
+
+    let mut next = Session::connect(&env).await;
+    assert_eq!(next.state().await["episode_id"], "over-http", "the env is free for a session");
+}
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn an_http_episode_the_agent_ended_keeps_its_grade() {
+    let env = Container::start(&Options::default());
+    env.wait_healthy();
+    let (status, _) = post(&env, "/episode", None, &json!({"task_id": "pay-invoice"})).await;
+    assert_eq!(status, 200);
+    let submit = json!({"name": "submit", "arguments": {"answer": "nothing to do"}});
+    assert_eq!(mcp(&env, "tools/call", &submit).await["result"]["done"], true);
+    let (status, record) = post(&env, "/episode/end", None, &json!({})).await;
+    assert_eq!(status, 200, "{record}");
+    assert_eq!(record["reward"], 0.0, "{record}");
+    assert_eq!(record["actions"].as_array().unwrap().len(), 1, "no second submit: {record}");
+}
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn a_refused_http_reset_leaves_the_env_free() {
+    let env = Container::start(&Options::default());
+    env.wait_healthy();
+    for (body, said) in [
+        (json!({"task_id": "nope"}), "unknown task 'nope'"),
+        (json!({"task_id": "pay-invoice", "coworkers": true}), "over the WebSocket only"),
+        (json!({"task_id": "pay-invoice", "tools": []}), "bad reset data"),
+    ] {
+        let (status, refusal) = post(&env, "/episode", None, &body).await;
+        assert_eq!(status, 400, "{body}: {refusal}");
+        assert!(refusal["detail"].as_str().unwrap().contains(said), "{body}: {refusal}");
+        assert_eq!(get(&env.url("/health")).1, r#"{"leased":false,"status":"healthy"}"#);
+    }
+    let reply = reqwest::Client::new().post(env.url("/episode")).send().await.unwrap();
+    assert_eq!(reply.status(), 200, "an empty body draws a task, as an empty reset frame does");
+}
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn the_agent_token_opens_mcp_alone() {
+    let env = Container::start(&Options {
+        docker_args: &["-e", "MIROIR_TOKEN=s3cret", "-e", "MIROIR_AGENT_TOKEN=ag3nt"],
+        ..Options::default()
+    });
+    env.wait_healthy();
+    let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+    assert_eq!(post(&env, "/mcp", Some("ag3nt"), &list).await.0, 200);
+    assert_eq!(post(&env, "/mcp?token=ag3nt", None, &list).await.0, 200);
+    let start = json!({"task_id": "pay-invoice"});
+    for path in ["/episode", "/episode/end", "/acme-crm/tasks"] {
+        assert_eq!(post(&env, path, Some("ag3nt"), &start).await.0, 401, "{path}");
+    }
+    let client = reqwest::Client::new();
+    for path in ["/metadata", "/ws", "/metadata?token=ag3nt"] {
+        let sent = client.get(env.url(path)).bearer_auth("ag3nt").send().await.unwrap();
+        assert_eq!(sent.status(), 401, "{path}");
+    }
+    let (status, started) = post(&env, "/episode", Some("s3cret"), &start).await;
+    assert_eq!(status, 200, "the control token opens every route: {started}");
+    assert_eq!(post(&env, "/mcp", Some("s3cret"), &list).await.0, 200);
+    assert_eq!(post(&env, "/episode/end", Some("s3cret"), &json!({})).await.0, 200);
+}
+
+#[test]
+#[ignore = "needs Docker"]
+fn an_agent_token_needs_a_control_token_of_its_own() {
+    crate::common::build_images();
+    for (env, said) in [
+        (&["-e", "MIROIR_AGENT_TOKEN=a"][..], "set MIROIR_TOKEN too"),
+        (&["-e", "MIROIR_TOKEN=a", "-e", "MIROIR_AGENT_TOKEN=a"][..], "must differ"),
+        (&["-e", "MIROIR_TOKEN=a", "-e", "MIROIR_AGENT_TOKEN="][..], "must not be empty"),
+    ] {
+        let run = [&["run", "--rm"][..], env, &[crate::common::ENV_IMAGE]].concat();
+        let out = crate::common::docker(&run);
+        assert!(!out.status.success(), "{env:?}");
+        let logs = String::from_utf8_lossy(&out.stderr);
+        assert!(logs.contains(said), "{env:?}: {logs}");
+    }
+}

@@ -573,6 +573,28 @@ impl Env {
         json!({"name": name, "description": self.persona_description(task)})
     }
 
+    /// End the episode, submitting for the agent if it still runs, as the Python client's
+    /// `finish()` does; returns its record.
+    pub async fn end(self: &Arc<Self>) -> Result<Value, EnvError> {
+        if !self.episode.lock().await.done {
+            let submit =
+                Action::CallTool { name: "submit".into(), arguments: Map::new(), episode_id: None };
+            let submitted = self.step(submit).await;
+            // The agent's own last call may have ended the episode meanwhile; only a running one
+            // means the submit failed.
+            if !self.episode.lock().await.done {
+                let why = match submitted {
+                    Ok(reply) => {
+                        reply["observation"]["error"]["message"].as_str().unwrap_or("").to_string()
+                    }
+                    Err(e) => e.to_string(),
+                };
+                return Err(EnvError::Other(format!("the submit that ends it failed: {why}")));
+            }
+        }
+        self.record(None).await
+    }
+
     /// The finished episode's record: calls, changes, effects, signature, grade and
     /// timings.
     pub async fn record(&self, episode_id: Option<&str>) -> Result<Value, EnvError> {
