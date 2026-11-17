@@ -48,12 +48,34 @@ pub async fn collect(paths: &Paths, manifest: &Manifest) -> anyhow::Result<Summa
         .wait_quiet(manifest.quiet.as_deref(), supervisor::QUIET_LIMIT)
         .await;
     let snapshot = pg.snapshot(pg::LOG_BUDGET).await;
-    let effects = journal::read(&paths.effects())
-        .with_context(|| format!("cannot read {}", paths.effects().display()))?;
+    let (effects, oversized) = read_effects(&paths.effects())?;
     let faults = journal::read(&paths.faults())
         .with_context(|| format!("cannot read {}", paths.faults().display()))?;
-    let evidence = assemble(Reads { boot, ignore, quiet, snapshot, effects, faults })?;
+    let mut evidence = assemble(Reads { boot, ignore, quiet, snapshot, effects, faults })?;
+    evidence.faults.extend(oversized);
     persist(&paths.evidence(), evidence).await
+}
+
+/// The lines of the effects journal; none, and an `evidence_budget` fault, when the file is over
+/// `evidence::BUDGET`: no evidence file could hold its effects, and reading it whole could
+/// exhaust the world's memory, which would void the trial instead of scoring it.
+fn read_effects(path: &Path) -> anyhow::Result<(Vec<Value>, Option<Fault>)> {
+    let cannot = || format!("cannot read {}", path.display());
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > evidence::BUDGET => {
+            let detail = format!(
+                "{} took {} bytes, over the evidence's {}-byte budget, so its effects were left \
+                 out",
+                path.display(),
+                meta.len(),
+                evidence::BUDGET
+            );
+            return Ok((Vec::new(), Some(Fault { kind: fault::EVIDENCE_BUDGET.into(), detail })));
+        }
+        Err(e) if e.kind() != ErrorKind::NotFound => return Err(e).with_context(cannot),
+        _ => {}
+    }
+    Ok((journal::read(path).with_context(cannot)?, None))
 }
 
 /// The tables `miroir run` read when the world became ready.
@@ -423,6 +445,34 @@ mod tests {
                 (boot[2].evidence_name(), strings(&["line"]), strings(&[])),
             ]
         );
+    }
+
+    #[test]
+    fn an_effects_journal_over_the_evidence_budget_is_a_fault_and_never_read() {
+        let dir = new_dir("effects");
+        let path = dir.join("effects.jsonl");
+        let (effects, fault) = read_effects(&path).unwrap();
+        assert!(effects.is_empty() && fault.is_none(), "a missing journal");
+        std::fs::write(&path, format!("{}\n", request("/first"))).unwrap();
+        let (effects, fault) = read_effects(&path).unwrap();
+        assert!(effects == [request("/first")] && fault.is_none());
+        // Zero bytes are not JSON, so only a journal left unread passes.
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(evidence::BUDGET + 1).unwrap();
+        let (effects, fault) = read_effects(&path).unwrap();
+        let fault = fault.unwrap();
+        assert_eq!((effects, fault.kind.as_str()), (Vec::new(), fault::EVIDENCE_BUDGET));
+        let detail = format!(
+            "{} took {} bytes, over the evidence's {}-byte budget, so its effects were left out",
+            path.display(),
+            evidence::BUDGET + 1,
+            evidence::BUDGET
+        );
+        assert_eq!(fault.detail, detail);
+        file.set_len(evidence::BUDGET).unwrap();
+        let error = format!("{:#}", read_effects(&path).unwrap_err());
+        assert!(error.contains("line 1 is not JSON"), "a journal within budget is read: {error}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
