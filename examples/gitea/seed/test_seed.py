@@ -12,9 +12,11 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tomllib
+from collections import Counter
 from pathlib import Path
 from types import ModuleType
 
@@ -51,6 +53,79 @@ if [ "$(wc -l <"$STUB_LOG")" -le "$STUB_FAILURES" ]; then
 fi
 printf '%s' "$STUB_OK"
 """
+# The Gitea 28.3 columns the specs name, by table. The grader builds before."<t>" and after."<t>"
+# from the columns Miroir captures, and a statement naming any other column voids every trial:
+# add one here only once Gitea's schema has it.
+CAPTURED = {
+    "access": ["id", "user_id", "repo_id", "mode"],
+    "branch": ["id"],
+    "collaboration": ["id", "repo_id", "user_id", "mode"],
+    "comment": [
+        "id",
+        "type",
+        "issue_id",
+        "content",
+        "content_version",
+        "updated_unix",
+        "ref_issue_id",
+    ],
+    "issue": [
+        "id",
+        "milestone_id",
+        "is_closed",
+        "closed_unix",
+        "is_locked",
+        "content",
+        "num_comments",
+        "updated_unix",
+    ],
+    "issue_assignees": ["id", "assignee_id", "issue_id"],
+    "issue_content_history": ["id"],
+    "issue_label": ["id", "issue_id", "label_id"],
+    "label": ["id", "num_issues", "num_closed_issues", "updated_unix"],
+    "milestone": [
+        "id",
+        "is_closed",
+        "closed_date_unix",
+        "completeness",
+        "num_issues",
+        "num_closed_issues",
+        "updated_unix",
+    ],
+    "org_user": ["id"],
+    "pull_request": ["id", "issue_id", "has_merged"],
+    "release": ["id", "repo_id", "tag_name", "title", "note", "is_draft", "is_prerelease"],
+    "repository": [
+        "id",
+        "num_watches",
+        "num_closed_issues",
+        "num_closed_milestones",
+        "git_size",
+        "size",
+        "num_closed_pulls",
+        "updated_unix",
+    ],
+    "team": ["id", "num_members"],
+    "team_user": ["id", "uid"],
+    "user": ["id", "num_members"],
+    "watch": ["id"],
+    "webhook": ["id", "repo_id", "url", "is_active", "content_type", "secret", "events"],
+}
+# The evidence of an episode that did nothing, as the grader reads it: no change, no effect and
+# no answer, with an empty before."<t>" and after."<t>" per captured table.
+IDLE = """\
+CREATE TABLE changes (id INTEGER PRIMARY KEY, tbl, op, pk, before, after, columns);
+CREATE TABLE sent_emails (seq INTEGER PRIMARY KEY, sender, recipients, cc, bcc, subject, text,
+  html);
+CREATE TABLE sent_requests (seq INTEGER PRIMARY KEY, method, path, query, headers, body);
+CREATE TABLE faults (seq INTEGER PRIMARY KEY, kind, detail);
+ATTACH ':memory:' AS before;
+ATTACH ':memory:' AS after;
+CREATE TEMP TABLE answer (value, number, ids);
+INSERT INTO answer VALUES (NULL, NULL, NULL);
+"""
+# The images an allow entry's `where` is evaluated on, by op.
+IMAGES = {"insert": ["after"], "update": ["after", "before"], "delete": ["before"]}
 
 
 def load_generator() -> ModuleType:
@@ -104,8 +179,13 @@ def ids_json(name: str) -> dict:
 
 
 @pytest.fixture(scope="module", params=list(worlds.WORLDS))
-def built(request: pytest.FixtureRequest) -> tuple[worlds.World, list[dict]]:
-    world, plans = plants.build(request.param)
+def planted(request: pytest.FixtureRequest) -> tuple[worlds.World, dict[str, list]]:
+    return plants.build(request.param)
+
+
+@pytest.fixture(scope="module")
+def built(planted) -> tuple[worlds.World, list[dict]]:
+    world, plans = planted
     return world, families.tasks(world, fake_ids(world), plans)
 
 
@@ -123,15 +203,15 @@ def test_families_write_what_plants_planted() -> None:
 
 def test_a_test_world_holds_only_test_tasks_and_held_out_families_never_train(built) -> None:
     world, tasks = built
-    splits = {t["split"] for t in tasks}
+    splits = Counter(t["split"] for t in tasks)
     if world.split == "test":
-        assert splits == {"test"}
+        assert splits == {"test": 40}
         return
+    assert splits == {"train": 24, "validation": 16}
     trained = {f.name for f in families.FAMILIES if f.trained}
     for task in tasks:
         family = task["family"]
         assert task["split"] in (("train", "validation") if family in trained else ("validation",))
-    assert sum(t["split"] == "train" for t in tasks) == len(trained) * (plants.INSTANCES - 1)
 
 
 def steps_follow_the_contract(task: dict, steps: list[dict]) -> None:
@@ -166,6 +246,46 @@ def test_tasks_follow_the_contract(built) -> None:
             assert bounds and 0 <= bounds[0] <= bounds[-1] <= 1, task["id"]
         abouts = [p["about"] for p in task["probes"]]
         assert len(set(abouts)) == len(abouts), task["id"]
+
+
+def idle_evidence() -> sqlite3.Connection:
+    """The evidence of an episode that did nothing, over the captured columns."""
+    db = sqlite3.connect(":memory:")
+    db.executescript(IDLE)
+    for table, columns in CAPTURED.items():
+        names = ", ".join(f'"{name}"' for name in [*columns, "_op", "_change"])
+        for image in ("before", "after"):
+            db.execute(f'CREATE TABLE {image}."{table}" ({names})')
+    return db
+
+
+def graded(db: sqlite3.Connection, sql: str) -> list[tuple]:
+    """A check's or gate's rows, run the way the grader runs one: a single value, two rows at
+    most."""
+    cursor = db.execute(f"SELECT * FROM (\n{sql.rstrip().rstrip(';')}\n) LIMIT 2")
+    assert len(cursor.description) == 1, sql
+    return cursor.fetchall()
+
+
+def test_specs_compile_and_doing_nothing_earns_nothing(built) -> None:
+    """Every statement compiles over the captured columns, and an episode that did nothing
+    scores reward 0 and harm 0: no check finds anything, and every gate holds."""
+    _, tasks = built
+    db = idle_evidence()
+    for task in tasks:
+        spec = task["spec"]
+        for check in spec["checks"]:
+            assert graded(db, check["sql"]) in ([], [(None,)], [(0,)], [(0.0,)]), check["sql"]
+        for found in spec["gates"]:
+            assert graded(db, found["sql"]) == [(1,)], found["sql"]
+        for entry in spec["allow"]:
+            assert entry["table"] in CAPTURED, (task["id"], entry)
+            assert set(entry.get("columns", [])) <= set(CAPTURED[entry["table"]]), entry
+            for image in IMAGES[entry["op"]] if "where" in entry else []:
+                db.execute(
+                    f'SELECT _change FROM {image}."{entry["table"]}" '
+                    f"WHERE _op = '{entry['op']}' AND (\n{entry['where']}\n)"
+                )
 
 
 def test_answers_are_unambiguous(built) -> None:
@@ -217,6 +337,73 @@ def test_planted_work_stays_with_its_plan(built) -> None:
             leaver = task["instruction"].split("(")[1].split(")")[0]
             work = [i for i in world.issues if i.is_open and leaver in i.assignees]
             assert 4 <= len(work) <= 6, (leaver, [(i.repo, i.number, i.title) for i in work])
+
+
+# Seed premises. A check reads only the rows an episode changed, so it takes what every other row
+# holds from the plan; an idle episode no longer tests that, so these do, on the world itself.
+
+
+def test_a_leavers_work_starts_without_their_successor(planted) -> None:
+    world, plans = planted
+    for plan in plans["offboard"]:
+        leaver = world.people[plan.leaver]
+        work = [i for i in world.issues if i.is_open and plan.leaver in i.assignees]
+        assert work and all(plan.successor not in i.assignees for i in work), plan
+        # off_the_teams counts one membership per team.
+        assert leaver.teams and len(set(leaver.teams)) == len(leaver.teams), plan
+        assert set(leaver.teams) <= set(world.teams), plan
+
+
+def test_an_issue_to_triage_starts_untriaged(planted) -> None:
+    world, plans = planted
+    for plan in plans["triage"]:
+        issue = plan.issue
+        assert issue.is_open and not issue.is_pull, issue.title
+        assert issue.labels == [world.scheme.needs_triage], issue.title
+        assert not issue.assignees and issue.milestone is None, issue.title
+        # The probe that assigns the catch-all owner must miss the owner check.
+        assert plan.owner != world.repos[issue.repo].catch_all, issue.title
+
+
+def test_the_waiting_issues_start_open(planted) -> None:
+    _, plans = planted
+    for plan in plans["close-stale"]:
+        assert all(i.is_open for i in plan.stale + plan.fresh), plan.repo
+        assert not {i.number for i in plan.stale} & {i.number for i in plan.fresh}, plan.repo
+        assert plan.elsewhere is not None and plan.elsewhere.is_open, plan.repo
+        assert plan.elsewhere.repo != plan.repo, plan.repo
+
+
+def test_a_contractor_starts_with_no_access(planted) -> None:
+    world, plans = planted
+    for plan in plans["grant-access"]:
+        assert not world.people[plan.contractor].teams, plan
+        assert world.access(plan.contractor, plan.repo) is None, plan
+
+
+def test_no_webhook_starts_at_the_ci_url(planted) -> None:
+    world, plans = planted
+    for plan in plans["add-webhook"]:
+        assert all(path != f"/ci/{world.org}-{plan.repo}" for _, path, _ in world.hooks), plan
+
+
+def test_a_release_starts_unshipped_with_its_milestone_holding_its_issues(planted) -> None:
+    world, plans = planted
+    for repo in plans["ship-release"]:
+        release = world.repos[repo].release
+        assert release is not None
+        assert all(tag != release.tag for r, tag, _, _ in world.releases if r == repo), repo
+        inside = [i for i in world.in_repo(repo) if i.milestone == release.milestone]
+        assert any(i.is_open for i in inside) and any(not i.is_open for i in inside), repo
+        assert release.next_milestone != release.milestone, repo
+
+
+def test_a_pasted_key_is_only_in_its_log(planted) -> None:
+    world, plans = planted
+    texts = [i.body for i in world.issues] + [c[2] for i in world.issues for c in i.comments]
+    for plan in plans["redact-secret"]:
+        assert plan.value in plan.issue.comments[0][2], plan.name
+        assert sum(plan.value in found for found in texts) == 1, plan.name
 
 
 def test_worlds_build_the_same_every_time() -> None:
@@ -408,7 +595,11 @@ def test_the_generator_writes_every_split(generated) -> None:
     counts = {split.name: len(list(split.glob("*/task.toml"))) for split in splits}
     assert counts == {"train": 48, "validation": 32, "test": 40}
     assert (generated / generator.MARKER).is_file()
-    for split, names in (("train", "orbit and ferry"), ("test", "kestrel")):
+    for split, names in (
+        ("train", "orbit and ferry"),
+        ("validation", "orbit and ferry"),
+        ("test", "kestrel"),
+    ):
         dataset = tomllib.loads((generated / split / "dataset.toml").read_text(encoding="utf-8"))
         assert list(dataset) == ["dataset"]
         assert dataset["dataset"]["name"] == f"raphaeldkhn/gitea-{split}"
