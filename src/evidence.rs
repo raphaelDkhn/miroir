@@ -38,7 +38,7 @@ CREATE TABLE changes (
 -- truncate and schema; rows absent from changes are as baked
 -- id order: truncates, then each table's keyed rows in the order the change log first touched
 -- them, then the rows of keyless tables, then schema changes
--- pk, before, after: a value nested deeper than 127 levels, or a number outside a double's
+-- pk, before, after: a value nested deeper than 126 levels, or a number outside a double's
 -- range, is a JSON string of its text
 
 CREATE TABLE sent_emails (

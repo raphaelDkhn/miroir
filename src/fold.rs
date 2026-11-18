@@ -203,18 +203,32 @@ fn image(text: Option<&str>, skip: Option<&BTreeSet<String>>) -> Result<Option<R
     Ok(Some(row))
 }
 
-/// `image` with each column's text parsed. A value `serde_json` cannot hold, nested past 127
-/// levels or a number past a double's range, stays a JSON string of its text: the agent can write
-/// one through a json, jsonb or numeric column, so it must be scored, never fail collect.
+/// `image` with each column's text parsed. A value nested past 126 levels or a number past a
+/// double's range stays a JSON string of its text: the agent can write one through a json,
+/// jsonb or numeric column, so it must be scored, never fail collect. 126, not `serde_json`'s
+/// 127: the row image holding the value adds a level, and grade and draft read row images back.
 fn values(mut image: Row) -> Row {
     for value in image.values_mut() {
         if let Value::String(text) = value
-            && let Ok(parsed) = serde_json::from_str(text)
+            && let Ok(parsed) = serde_json::from_str::<Value>(text)
+            && depth(&parsed) <= MAX_DEPTH
         {
             *value = parsed;
         }
     }
     image
+}
+
+/// The deepest nesting a column value keeps as parsed JSON (see [`values`]).
+const MAX_DEPTH: usize = 126;
+
+/// How many arrays and objects deep `value` nests: 0 for a scalar.
+fn depth(value: &Value) -> usize {
+    match value {
+        Value::Array(items) => 1 + items.iter().map(depth).max().unwrap_or(0),
+        Value::Object(map) => 1 + map.values().map(depth).max().unwrap_or(0),
+        _ => 0,
+    }
 }
 
 /// The primary key of `row`.
@@ -605,13 +619,18 @@ mod tests {
             raw("settings", "insert", None, Some(&new))
         };
         let past_a_double = format!("1{}", "0".repeat(400));
-        for data in [nested(128), past_a_double] {
+        for data in [nested(127), nested(128), past_a_double] {
             let changes = fold(&[insert(&data)], &tables, &Ignore::default()).unwrap();
             let after = changes[0].after.as_ref().unwrap();
             assert_eq!((&after["id"], &after["data"]), (&json!(1), &Value::String(data)));
+            let image = serde_json::to_string(&changes[0].after).unwrap();
+            assert!(serde_json::from_str::<Value>(&image).is_ok(), "its row image reads back");
         }
-        let changes = fold(&[insert(&nested(127))], &tables, &Ignore::default()).unwrap();
-        assert!(changes[0].after.as_ref().unwrap()["data"].is_array(), "127 levels still parse");
+        let changes = fold(&[insert(&nested(126))], &tables, &Ignore::default()).unwrap();
+        let after = changes[0].after.as_ref().unwrap();
+        assert!(after["data"].is_array(), "126 levels still parse");
+        let image = serde_json::to_string(after).unwrap();
+        assert!(serde_json::from_str::<Value>(&image).is_ok(), "and their row image reads back");
         let ignore = ignoring(&[], &[("settings", "data")]);
         let changes = fold(&[insert(&nested(128))], &tables, &ignore).unwrap();
         assert_eq!(changes[0].after, Some(object(json!({"id": 1}))));

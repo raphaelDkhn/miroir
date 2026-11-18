@@ -314,7 +314,7 @@ CREATE TABLE changes (
 -- truncate and schema; rows absent from changes are as baked
 -- id order: truncates, then each table's keyed rows in the order the change log first touched
 -- them, then the rows of keyless tables, then schema changes
--- pk, before, after: a value nested deeper than 127 levels, or a number outside a double's
+-- pk, before, after: a value nested deeper than 126 levels, or a number outside a double's
 -- range, is a JSON string of its text
 
 CREATE TABLE sent_emails (
@@ -346,9 +346,12 @@ The grader adds, in memory:
 
 Values keep their JSON types: booleans read as 1 or 0, JSON objects and arrays as JSON text,
 `timestamptz` as `2026-11-17T10:00:00+00:00` and `timestamp` as `2026-11-17T10:00:00` (UTC),
-dates as `YYYY-MM-DD`, Unix times as integers, and `numeric` as REAL. Ignored columns are absent.
-Ignored tables, tables created after the bake, files and git refs are not in the evidence, so no
-check can read them.
+dates as `YYYY-MM-DD`, Unix times as integers, and `numeric` as REAL. A value nested past 126
+levels or a number past a double's range reads as its JSON text. A row counts as changed when the
+text Postgres wrote for it changed, so rewriting a numeric to a new scale (`1.5` to `1.50`) is an
+update even though both images read the same REAL. Ignored columns are absent. Ignored tables,
+tables created after the bake, files and git refs are not in the evidence, so no check can read
+them.
 
 ## Check recipes
 
