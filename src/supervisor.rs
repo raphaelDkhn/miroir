@@ -401,12 +401,27 @@ fn signal(group: Pid, signal: Signal) {
 }
 
 /// Have the kernel's OOM killer pick this child before `miroir` (Linux only). Call it before
-/// the child is reaped, so its `/proc` entry still exists.
+/// the child is reaped, so its `/proc` entry still exists. A child that already exited needs
+/// nothing: its `/proc` entry then belongs to root, so a `miroir` that is not root cannot write
+/// it, and that failure is no error.
 fn deprioritize(pid: Pid) -> std::io::Result<()> {
-    if cfg!(target_os = "linux") {
-        std::fs::write(format!("/proc/{}/oom_score_adj", pid.as_raw_pid()), "1000")?;
+    if !cfg!(target_os = "linux") {
+        return Ok(());
     }
-    Ok(())
+    let proc = format!("/proc/{}", pid.as_raw_pid());
+    match std::fs::write(format!("{proc}/oom_score_adj"), "1000") {
+        Err(_) if std::fs::read_to_string(format!("{proc}/stat")).map_or(true, |s| exited(&s)) => {
+            Ok(())
+        }
+        written => written,
+    }
+}
+
+/// Whether a `/proc/<pid>/stat` line is a process that exited: a zombie (`Z`) or dead (`X`).
+/// The state follows the command name, which may hold spaces and `)`, so it is read after the
+/// last `)`.
+fn exited(stat: &str) -> bool {
+    stat.rsplit_once(')').is_some_and(|(_, rest)| rest.trim_start().starts_with(['Z', 'X']))
 }
 
 /// `: <the last line>` of what a command printed, or nothing when it printed none.
@@ -849,5 +864,30 @@ mod tests {
         let check = sh(r#"sleep 0.3; test "$(cat /proc/self/oom_score_adj)" = 1000"#);
         supervisor.run_within(&check, LONG).await.unwrap();
         supervisor.stop(LONG).await.unwrap();
+    }
+
+    /// A child can exit before its `oom_score_adj` is written; when `miroir` is not root, its
+    /// `/proc` entry then belongs to root and refuses the write.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_child_that_already_exited_needs_no_deprioritizing() {
+        let mut child = std::process::Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        let pid = Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+        let stat = format!("/proc/{}/stat", pid.as_raw_pid());
+        while !exited(&std::fs::read_to_string(&stat).unwrap()) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        deprioritize(pid).unwrap();
+        child.wait().unwrap();
+        deprioritize(pid).unwrap();
+    }
+
+    #[test]
+    fn a_stat_line_says_whether_its_process_exited() {
+        assert!(exited("42 (sh) Z 1 42 42 0 -1"));
+        assert!(exited("42 (a) b) X 1"), "the name may hold ')'");
+        assert!(!exited("42 (sleep) S 1 42 42 0 -1"));
+        assert!(!exited("42 (Z) R 1"), "a name is not a state");
+        assert!(!exited("no state"));
     }
 }
