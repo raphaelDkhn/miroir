@@ -1,4 +1,6 @@
-# Miroir
+# Miroir 🪞
+
+**Turn a product into an agentic RL environment**
 
 Miroir turns a product's Docker image into [Harbor](https://docs.harborframework.com)
 environments that grade what an agent did to the real product: the database rows it changed, the
