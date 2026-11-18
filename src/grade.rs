@@ -1583,6 +1583,7 @@ allow:
         let unreadable = graded(&inputs).await;
         let Outcome::Void(reason) = &unreadable.outcome else { panic!("{:?}", unreadable.outcome) };
         assert!(reason.starts_with(&format!("{prefix}it is not Miroir evidence: ")), "{reason}");
+        assert_eq!(reason.matches("file is not a database").count(), 1, "said once: {reason}");
         std::fs::remove_file(&inputs.evidence).unwrap();
         std::fs::create_dir(&inputs.evidence).unwrap();
         let directory = graded(&inputs).await;

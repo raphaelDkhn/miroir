@@ -222,13 +222,14 @@ async fn fill(path: &Path, evidence: &Evidence) -> anyhow::Result<()> {
 pub async fn open(path: &Path, read_only: bool) -> anyhow::Result<SqliteConnection> {
     let options =
         SqliteConnectOptions::new().filename(path).read_only(read_only).disable_statement_logging();
+    // A sqlx error's text already holds its source's, so it is formatted once, not chained.
     let mut conn = SqliteConnection::connect_with(&options)
         .await
-        .with_context(|| format!("cannot open {}", path.display()))?;
+        .map_err(|e| anyhow::anyhow!("cannot open {}: {e}", path.display()))?;
     let meta: BTreeMap<String, String> = sqlx::query_as("SELECT key, value FROM meta")
         .fetch_all(&mut conn)
         .await
-        .context("it is not Miroir evidence")?
+        .map_err(|e| anyhow::anyhow!("it is not Miroir evidence: {e}"))?
         .into_iter()
         .collect();
     let format = meta.get("format").map_or("none", String::as_str);
@@ -667,8 +668,9 @@ mod tests {
         let mut conn = SqliteConnection::connect_with(&options).await.unwrap();
         sqlx::raw_sql("CREATE TABLE notes (text TEXT)").execute(&mut conn).await.unwrap();
         conn.close().await.unwrap();
-        let error = open(&path, false).await.unwrap_err().to_string();
-        assert!(error.ends_with("is not Miroir evidence"), "{error}");
+        let error = format!("{:#}", open(&path, false).await.unwrap_err());
+        assert!(error.starts_with("it is not Miroir evidence: "), "{error}");
+        assert_eq!(error.matches("no such table: meta").count(), 1, "said once: {error}");
         std::fs::remove_file(path).unwrap();
     }
 
