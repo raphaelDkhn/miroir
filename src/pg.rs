@@ -40,6 +40,11 @@ WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition
 ORDER BY n.nspname, c.relname, a.attnum";
 
 const CAPTURE: &str = r"
+DO $$ BEGIN
+  IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) THEN
+    RAISE EXCEPTION 'role % is not a superuser', current_user;
+  END IF;
+END $$;
 CREATE SCHEMA IF NOT EXISTS miroir;
 CREATE TABLE IF NOT EXISTS miroir.log (
   seq bigserial PRIMARY KEY, tbl text NOT NULL, op text NOT NULL, old jsonb, new jsonb);
@@ -236,7 +241,9 @@ impl Pg {
 
     /// Install change capture on every table not ignored: the `miroir` schema, `miroir.log`,
     /// `miroir.capture()` (`SECURITY DEFINER`, in UTC), and on each table the row trigger
-    /// `miroir_capture` and the statement trigger `miroir_truncate`, in one transaction.
+    /// `miroir_capture` and the statement trigger `miroir_truncate`, in one transaction. A role
+    /// that is not a superuser is refused, since a table owner could install capture but never
+    /// run the date shift a later boot needs.
     pub async fn install_capture(&self, tables: &[Table], ignore: &Ignore) -> Result<(), PgError> {
         let mut conn = connect(&self.database.url).await?;
         sqlx::raw_sql(AssertSqlSafe(capture_sql(tables, ignore)))
@@ -1062,6 +1069,9 @@ mod tests {
         assert!(
             CAPTURE.contains("SECURITY DEFINER SET search_path = pg_catalog SET timezone = 'UTC'")
         );
+        let (refusal, _) = CAPTURE.split_once("CREATE SCHEMA").unwrap();
+        let refused = "RAISE EXCEPTION 'role % is not a superuser', current_user;";
+        assert!(refusal.contains(refused), "a role that is not a superuser installs nothing");
         assert_eq!(capture_sql(&[], &ignore), CAPTURE, "the log exists even with no table");
     }
 
