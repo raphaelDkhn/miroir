@@ -401,9 +401,9 @@ fn signal(group: Pid, signal: Signal) {
 }
 
 /// Have the kernel's OOM killer pick this child before `miroir` (Linux only). Call it before
-/// the child is reaped, so its `/proc` entry still exists. A child that already exited needs
-/// nothing: its `/proc` entry then belongs to root, so a `miroir` that is not root cannot write
-/// it, and that failure is no error.
+/// the child is reaped, so its `/proc` entry still exists. A child that is exiting or exited
+/// needs nothing: its `/proc` entry then belongs to root, so a `miroir` that is not root cannot
+/// write it, and that failure is no error.
 fn deprioritize(pid: Pid) -> std::io::Result<()> {
     if !cfg!(target_os = "linux") {
         return Ok(());
@@ -417,11 +417,16 @@ fn deprioritize(pid: Pid) -> std::io::Result<()> {
     }
 }
 
-/// Whether a `/proc/<pid>/stat` line is a process that exited: a zombie (`Z`) or dead (`X`).
-/// The state follows the command name, which may hold spaces and `)`, so it is read after the
-/// last `)`.
+/// Whether a `/proc/<pid>/stat` line is a process that is exiting or exited: a zombie (`Z`), a
+/// dead one (`X`), or one whose address space is gone (`vsize`, field 23, is 0). An exiting
+/// process drops its address space well before it shows as a zombie, and from then on the
+/// kernel gives its `/proc` entry to root. The fields after the command name, which may hold
+/// spaces and `)`, are read after the last `)`.
 fn exited(stat: &str) -> bool {
-    stat.rsplit_once(')').is_some_and(|(_, rest)| rest.trim_start().starts_with(['Z', 'X']))
+    let Some((_, rest)) = stat.rsplit_once(')') else { return false };
+    let mut fields = rest.split_whitespace();
+    let state = fields.next().unwrap_or_default();
+    state == "Z" || state == "X" || fields.nth(19) == Some("0")
 }
 
 /// `: <the last line>` of what a command printed, or nothing when it printed none.
@@ -884,8 +889,12 @@ mod tests {
 
     #[test]
     fn a_stat_line_says_whether_its_process_exited() {
+        // Fields 3 to 24: the state, fields 4 to 21, then starttime, vsize and rss.
+        let numbers = "1 42 42 0 -1 4194304 90 0 0 0 0 0 0 0 20 0 1 0";
         assert!(exited("42 (sh) Z 1 42 42 0 -1"));
         assert!(exited("42 (a) b) X 1"), "the name may hold ')'");
+        assert!(exited(&format!("42 (sh) R {numbers} 1234 0 0")), "exiting: no address space");
+        assert!(!exited(&format!("42 (sleep) S {numbers} 1234 2895872 220")));
         assert!(!exited("42 (sleep) S 1 42 42 0 -1"));
         assert!(!exited("42 (Z) R 1"), "a name is not a state");
         assert!(!exited("no state"));
