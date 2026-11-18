@@ -122,8 +122,12 @@ impl Supervisor {
             command.current_dir(cwd);
         }
         if let Some(user) = &process.user {
-            let (uid, gid) = user_ids(user).await.map_err(failed)?;
+            let (uid, gid, home) = user_ids(user).await.map_err(failed)?;
             command.uid(uid).gid(gid);
+            // As su-exec, gosu and Docker's USER do; a HOME in either env still wins.
+            if !self.env.contains_key("HOME") && !process.env.contains_key("HOME") {
+                command.env("HOME", home);
+            }
         }
         let child =
             command.spawn().map_err(|e| failed(format!("{e}; check its command, cwd and user")))?;
@@ -417,25 +421,25 @@ fn described(status: ExitStatus) -> String {
     }
 }
 
-/// The uid and gid of `user`, from `/etc/passwd`.
-async fn user_ids(user: &str) -> Result<(u32, u32), String> {
+/// The uid, gid and home directory of `user`, from `/etc/passwd`.
+async fn user_ids(user: &str) -> Result<(u32, u32, String), String> {
     let passwd = tokio::fs::read("/etc/passwd")
         .await
         .map_err(|e| format!("cannot read /etc/passwd to find user '{user}': {e}"))?;
     passwd_ids(&String::from_utf8_lossy(&passwd), user)
 }
 
-fn passwd_ids(passwd: &str, user: &str) -> Result<(u32, u32), String> {
+fn passwd_ids(passwd: &str, user: &str) -> Result<(u32, u32, String), String> {
     for line in passwd.lines() {
         let fields: Vec<&str> = line.split(':').collect();
-        let [name, _, uid, gid, ..] = fields.as_slice() else { continue };
+        let [name, _, uid, gid, _, home, ..] = fields.as_slice() else { continue };
         if *name != user {
             continue;
         }
         let number = |id: &str| {
             id.parse().map_err(|_| format!("user '{user}' has '{id}' as an id in /etc/passwd"))
         };
-        return Ok((number(uid)?, number(gid)?));
+        return Ok((number(uid)?, number(gid)?, (*home).to_string()));
     }
     Err(format!("no user '{user}' in /etc/passwd; create it in the world's Dockerfile"))
 }
@@ -632,8 +636,8 @@ mod tests {
                       short:x:1\n\
                       postgres:x:70:71:PostgreSQL:/var/lib/postgresql:/bin/sh\n\
                       broken:x:abc:1::/:/bin/sh\n";
-        assert_eq!(passwd_ids(passwd, "root"), Ok((0, 0)));
-        assert_eq!(passwd_ids(passwd, "postgres"), Ok((70, 71)));
+        assert_eq!(passwd_ids(passwd, "root"), Ok((0, 0, "/root".into())));
+        assert_eq!(passwd_ids(passwd, "postgres"), Ok((70, 71, "/var/lib/postgresql".into())));
         let error = passwd_ids(passwd, "broken").unwrap_err();
         assert_eq!(error, "user 'broken' has 'abc' as an id in /etc/passwd");
         let error = passwd_ids(passwd, "short").unwrap_err();
