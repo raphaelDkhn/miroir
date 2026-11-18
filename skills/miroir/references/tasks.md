@@ -457,9 +457,11 @@ again ([the authoring loop](#the-authoring-loop)). What the draft does, and what
 - An update is allowed on its row, for every column a run changed. An insert is allowed where its
   integer and boolean values hold, so an agent that words a note differently is not charged with
   harm; its check also compares text.
-- Keys the product assigns are left out: an inserted row's own id, and a `*_id` or `*Id` column
-  or an answer whose value is the key of a row the same run inserted. A comment names each, and
-  the row is matched by its content (authoring rule 4).
+- Keys the product assigns are left out: an inserted row's own id, a `*_id` or `*Id` column named
+  after that row's table (`label_id` for a new `labels` row), and an answer, whose value is the key
+  of a row the same run inserted. A comment names each, and the row is matched by its content
+  (authoring rule 4). A reference named by its role, such as Gitea's `poster_id` or `repo_id`, is
+  not recognized and stays a constant: review every `*_id` value that equals a new row's key.
 - Text over 256 bytes is not compared, and dates and times compared as constants are listed:
   every boot moves them.
 - A change only some runs made is allowed but not checked, and listed as `seen in k of N runs`.
