@@ -1,5 +1,5 @@
 #!/bin/bash
-# The Harbor end-to-end gate (§9.3): build the images, check the fixture's tasks, run its
+# The Harbor end-to-end gate: build the images, check the fixture's tasks, run its
 # check.yaml through Harbor and validate the job with `miroir check`, then regrade the job with a
 # changed spec, and void a trial whose evidence is gone. Needs Docker with buildx, Harbor 0.26.0
 # and jq. Its work directories stay under jobs/ for inspection.

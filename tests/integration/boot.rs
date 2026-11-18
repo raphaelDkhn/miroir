@@ -1,4 +1,4 @@
-//! `miroir run` in the world image (§3.5): the boot, its refusals, the date shift, crashes and
+//! `miroir run` in the world image: the boot, its refusals, the date shift, crashes and
 //! the SIGTERM stop.
 
 use std::time::{Duration, Instant};
