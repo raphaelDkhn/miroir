@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "miroir",
-      "description": "Make, check, serve and train on Miroir envs: reinforcement-learning environments made from a product's Docker image",
+      "description": "Wrap a product's container image as a Miroir world and write Harbor tasks graded from what the agent changed in the product, validated with miroir check",
       "source": "./",
       "strict": false,
       "skills": ["./skills/miroir"]

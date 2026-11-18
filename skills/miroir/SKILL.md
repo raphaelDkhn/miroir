@@ -1,214 +1,131 @@
 ---
 name: miroir
-description: Build, check, serve and train on Miroir envs, which turn a product's Docker image into a reinforcement-learning environment. Use to write a Dockerfile.miroir, a miroir.yaml manifest or tasks/*.yaml (instructions, SQL checks, gates, allowed_changes, golden runs, probes); to fix `miroir bake` or `miroir check` failures; to explore a running env or play episodes with the Python client; to run pools, TRL or verifiers rollouts, review grades or calibrate tasks; or to scrub production dumps and traces into seed data and tasks. Also use when a repo has a miroir.yaml or Dockerfile.miroir, or the user mentions Miroir.
+description: Wrap a product's container image as a Miroir world and write Harbor tasks graded from what the agent changed in the product's Postgres database, the emails and HTTP calls the product sent, and the agent's answer. Use to write a Dockerfile.miroir or a miroir.yaml manifest; to fix a failing `miroir bake` or boot; to write or fix task directories (instruction.md, solution/solve.sh, probes, task.toml with a MIROIR_SPEC of checks, gates and allow entries); to draft a spec with `miroir draft`; to validate graders with a check.yaml job and `miroir check`; to regrade after a spec fix; to generate tasks at scale; or to publish or train on Miroir datasets. Also use when a repository has a miroir.yaml, a Dockerfile.miroir or task.toml files holding MIROIR_SPEC, or the user mentions Miroir.
 license: Apache-2.0
-compatibility: Needs Docker with buildx. The host CLI and Python client need Python 3.11+ and uv.
+compatibility: Needs Docker with buildx and Harbor 0.26.0 (uv tool install harbor==0.26.0). The miroir binary is Linux-only; on other hosts run it from its image.
 ---
 
 # Miroir
 
-Miroir turns a product's Docker image into a reinforcement-learning environment, an *env*. You
-add a manifest (`miroir.yaml`) and tasks to the image. `miroir bake` seeds the data at build
-time. `miroir run` restores that seed before every episode, gives the agent the product's API as
-tools over OpenEnv (WebSocket) and MCP, and grades the end state from the rows that changed and
-the emails and HTTP calls the product sent.
+Miroir turns a product's container image into Harbor environments graded from what the agent
+actually did to the product. Harbor runs everything else: tasks, agents, sandboxes, jobs,
+regrades, publishing. Miroir never wraps `harbor run`.
 
-Two programs are called `miroir`:
+## Mental model
 
-| Program | Runs | Commands |
-|---|---|---|
-| Rust binary | inside the env image, as its entrypoint under `tini` | `bake`, `check`, `run`, `sandbox`, `import`, `export harbor` |
-| Python package | on the host | `pool`, `review`, `calibrate`, `draft`, `derive`; the `Session` client; TRL and verifiers adapters |
+1. A **world image** is the product plus Postgres, `tini`, the `miroir` binary and
+   `/miroir/miroir.yaml`, seeded at `docker build` by `RUN miroir bake`; `miroir run` boots it.
+2. A **task** is a plain Harbor task directory. The world is a compose service next to `main`,
+   where the agent calls the product's own API with a test credential from `instruction.md`.
+3. When the agent stops, Harbor's collect hook runs `miroir collect` in the world, which writes
+   the **evidence**: net row changes, sent emails and requests, faults.
+4. Harbor's separate verifier runs `miroir grade` with the task's **spec** (`MIROIR_SPEC`):
+   checks score `reward`; a change no `allow` entry admits, a failed gate or a fault is `harm`,
+   which zeroes the reward.
+5. A grader is valid when the reference solution scores reward 1 and harm 0, doing nothing scores
+   0 and 0, and every **probe** (a wrong solution) stays within its declared bounds and harm.
 
-Run the image's commands as `docker run --rm IMAGE COMMAND`. They refuse to run under
-`docker exec`: Miroir must be the container's entrypoint, or a child of its init.
+## Run miroir on the host
 
-Install the Python package from PyPI with `uv pip install miroir`; the adapters need
-`'miroir[trl]'` or `'miroir[verifiers]'`.
+`miroir check` and `miroir draft` run on the host, from the Miroir image. The alias sees only the
+current directory, so keep every path under it (Harbor's `jobs/` is):
+
+```bash
+alias miroir='docker run --rm -v "$PWD:$PWD" -w "$PWD" miroir:dev miroir'
+```
+
+`miroir:dev` is what `docker buildx bake` builds in the Miroir repository; releases publish
+`ghcr.io/raphaeldkhn/miroir:<major>.<minor>`. `bake`, `run` and `collect` run inside the world
+image, and `grade` inside the grader's; none of them runs on the host.
 
 ## Choose the job
 
-| The user wants to | Follow | Then read |
-|---|---|---|
-| turn a product into an env | [Make an env](#make-an-env) | `references/manifest.md` |
-| add or fix tasks | [Write a task](#write-a-task) | `references/tasks.md` |
-| make `miroir check` pass | [The check loop](#the-check-loop) | `references/check.md` |
-| serve an env, play episodes, train or evaluate, review grades, calibrate | [Explore a running env](#explore-a-running-env) | `references/run-and-train.md` |
-| run the tasks in Harbor, with Claude Code, Codex or another agent | | `references/run-and-train.md`, "Harbor" |
-| seed from production dumps | | `references/manifest.md`, "Production dumps" |
-| turn production traces into tasks | | `references/tasks.md`, "Tasks from traces" |
+| The user wants to | Then read |
+|---|---|
+| turn a product into a world, or fix a bake or a boot | `references/environment.md` |
+| write or fix a task, its spec or its probes | `references/tasks.md` |
+| generate many tasks | `references/tasks.md`, "Generate tasks" |
+| validate graders, read `miroir check` output | [Validate and publish](https://raphaeldkhn.github.io/miroir/validate.html) |
+| publish a dataset | [Validate and publish](https://raphaeldkhn.github.io/miroir/validate.html#publish), then Harbor's `publish` skill |
+| train, or pick tasks to train on | [Train](https://raphaeldkhn.github.io/miroir/train.html) |
+| turn a production snapshot or a ticket into a world or a task | `references/environment.md`, "From production" |
 
-Look before you write. Find `miroir.yaml`, `Dockerfile.miroir` and `tasks/` if they exist, and
-the product's own Dockerfile or compose file, migrations, seed scripts, OpenAPI spec and auth
-code. The Miroir repository's
-[`fixtures/`](https://github.com/raphaelDkhn/miroir/tree/master/fixtures) are envs that pass
-`check`: `acme-crm` (Postgres, Redis, a worker, an MCP server), `mini-shop` (MySQL, two worlds)
-and `acme-apps` (several apps). Its
-[`examples/gitea`](https://github.com/raphaelDkhn/miroir/tree/master/examples/gitea) makes a
-stock product image an env: Gitea with Postgres, Unix-time columns, mail and webhooks in the
-sinks, coworkers and clocks, three worlds, and a seed that writes the tasks from the ids its
-rows got.
+Look before you write. Find `miroir.yaml`, `Dockerfile.miroir`, task directories whose
+`task.toml` holds `MIROIR_SPEC`, and `check.yaml`; then the product's own Dockerfile or compose
+file, migrations, seed scripts, API description and authentication. The Miroir repository's
+[`fixtures/acme-crm`](https://github.com/raphaelDkhn/miroir/tree/master/fixtures/acme-crm) (a CRM,
+7 tasks) and [`examples/gitea`](https://github.com/raphaelDkhn/miroir/tree/master/examples/gitea)
+(stock Gitea, three worlds, a task generator) are working examples to copy.
 
-## Make an env
+## Wrap a product
 
-1. **Map the product.** List every long-running process (web servers, workers, schedulers) and
-   every datastore, with its command, port, user and environment; a compose file holds most of
-   this. Find how the seed data is made (migrations, seed scripts, fixtures), how the API
-   authenticates (a token or key you can seed for a persona), the OpenAPI spec, what the product
-   sends out (email, payment or webhook calls), what runs in the background (queues, cron), and
-   every directory it writes.
-2. **Write `Dockerfile.miroir`** on top of the product's image: install its datastores and
-   `tini`, copy in the `miroir` binary, the manifest and `tasks/`, initialize each datastore's
-   data directory as its user, then `RUN miroir bake`. Everything runs in this one container.
-   The template is in `references/manifest.md`.
-3. **Write `miroir.yaml`**: the processes in order, datastores first with `datastore: true`, each
-   with a non-root `user` and a `ready` probe; an `env` that points email and outbound base URLs
-   at the sinks and turns schedulers off; `bake` commands that create, migrate and seed the
-   database; the `state` directories; the `apps` (API base URL and spec, and a database URL whose
-   user can create triggers); a persona whose headers carry a seeded credential; the `sinks`; and
-   a `quiet` command if the product queues work.
-4. **Write one read-only task first**, such as a count with `answer: integer` and
-   `allowed_changes: []`, so the first check tests the env, not the task.
-5. **Build** with `docker build -f Dockerfile.miroir -t NAME-env .`. Bake runs during the build,
-   so its errors are in the build log.
-6. **Check until it passes**: [the check loop](#the-check-loop).
-7. **Add tasks** a few at a time, and check after each.
+1. Map every process and datastore (command, port, user, environment), what the product sends
+   out, and what runs in the background.
+2. Write `Dockerfile.miroir` from the fixture's, and `miroir.yaml`: datastores first, a ready
+   probe per server, `env` pointing mail and outbound URLs at the sinks, `bake` and `seed`
+   commands, `database`, `sinks`, `quiet`.
+3. Build: `docker build -f Dockerfile.miroir -t my-env:dev .`. The bake runs inside the build;
+   a failure names the step, the command or field, and the fix.
+4. Boot: `docker run --rm -p 3000:3000 my-env:dev` until it logs `booted in …`. A boot failure
+   names the step and the fix, such as a port that listens off loopback.
 
-## Write a task
+## The authoring loop
 
-A task is `tasks/<id>.yaml`: an instruction, weighted checks and gates, the changes it may make,
-and a golden run that must earn 1. Fields and check recipes are in `references/tasks.md`.
+1. Copy a fixture task directory. Set the world image and service in
+   `environment/docker-compose.yaml`, and the service in `artifacts` and `[[verifier.collect]]`.
+2. Write `instruction.md` (who the agent acts as, the API's URL and credential, the request) and
+   `solution/solve.sh` (every call `curl -fsS`).
+3. Give it a placeholder spec, `checks: [{name: todo, sql: SELECT 0}]` with `allow: []`, and run
+   `miroir check --tasks tasks` for the static checks.
+4. Run the reference twice, then draft the spec from both runs:
 
-1. **Find facts** in the seed data and the API ([explore a running env](#explore-a-running-env)):
-   the ids, names and amounts the instruction can name, and the calls that solve it.
-2. **Write the instruction** as a request the persona gets at work, such as from a colleague or
-   a customer. Name the records, and say what must stay as it is. Never write an absolute date:
-   every reset moves the data's dates forward, so write "today", "last week" or "overdue". When
-   the answer is a number, a list of ids or a date, set `answer`.
-3. **Write the golden run**: the calls that solve the task, ending with `submit` (with an
-   `answer` when the task asks for one).
-4. **Learn what it changes.** Play the calls on the scratch task and read `record["changes"]`:
-   each net change's table, op and columns. Without a scratch run, set `allowed_changes: []` and
-   run the check; the golden stage then lists each change, such as
-   `outside allowed_changes: update invoices {"id":4001} (paid_at, payment_intent, status)`.
-   Allow exactly those tables, ops and columns.
-5. **Write the checks** on the end state, not on the calls: there are many ways to do a task.
-   The weights sum to 1 and give partial credit. Add a gate for each thing that must not happen,
-   such as another row changed or an email sent. Compare a submitted answer whole
-   (`value = '3'`), never search inside it. For text the agent writes into a row, such as a
-   note, match a keyword (`text ~* 'competitor'`), knowing it rejects paraphrases.
-6. **Add probes**, one per plausible wrong solution (does too much, picks the wrong record,
-   sends the email twice), with `max_reward: 0`.
-7. **Check.** A probe that earns too much means the checks are too weak: fix the checks, never
-   the probe. A probe whose calls fail earns 0 and passes without testing anything, so confirm in
-   the `--json` report that its calls worked and the gate you meant caught it
-   (`references/check.md`).
+   ```bash
+   harbor run -p tasks/<task> -a oracle -k 2 -n 1 --job-name ref
+   miroir draft jobs/ref/<task>__*
+   ```
 
-## The check loop
+5. Paste the draft into `MIROIR_SPEC` and review it: drop checks the instruction does not ask
+   for, loosen exact text the agent may word its own way, move invariants to gates.
+6. Regrade instead of rerunning. Bump the minor version, then:
 
-`miroir check` replays each task's golden run, an empty submit, two repeats and the probes, and
-checks that the env idles, resets cleanly and writes only to its state. It prints a table, each
-failure's reason under its task, then `PASSED` (exit 0) or `FAILED` (exit 1).
+   ```bash
+   harbor job regrade jobs/ref -p tasks/<task> --job-name ref-2
+   cat jobs/ref-2/*/verifier/test-stdout.txt
+   ```
 
-```sh
-docker build -f Dockerfile.miroir -t my-env .   # after changing the manifest, Dockerfile or seed
-docker run --rm --network none my-env check 2>check.log
-```
+   The reference must read `reward 1.00  harm 0`. Each out-of-scope change is printed with a
+   paste-ready `allow` line.
+7. Add probes: `solution/probe-N.sh` plus a `[[metadata.miroir.probes]]` entry with `harm` and a
+   reward bound. Run the check job until `miroir check` exits 0:
 
-- The report goes to stdout; the datastores' and the product's logs go to stderr, hundreds of
-  lines, hence `2>check.log`. An `ERROR` in those logs, such as a constraint conflict while
-  dates move (Miroir retries those), fails nothing: the report decides.
-- Tasks are read when the container starts, so task edits need no rebuild. Mount them over the
-  baked ones: `docker run --rm --network none -v "$PWD/tasks:/miroir/tasks:ro" my-env check`.
-  Edits to the manifest, the Dockerfile or the seed need a rebuild, since bake uses them.
-- To check one task, mount a directory that holds only that task (and its `probes/<id>.yaml`).
-- A check idles for 30 s, then resets several times per task. On `acme-crm`, 8 tasks take under
-  two minutes. Run it in the background on large envs, or check one world with `--world W`.
-- `--json` prints the whole report: each stage's `passed`, and for the golden run its
-  `statuses`, its `checks` with their scores, and its `metadata` (`out_of_scope`, `fault`,
-  `termination`).
-- `--mutate` also replays the golden run without each of its calls, to find calls it doesn't
-  need and checks too weak to notice. Its lines are advice: they never fail the check.
-- Tasks whose runs call `run_code` need a sandbox; see `references/check.md`.
+   ```bash
+   harbor run -c check.yaml --job-name gate
+   miroir check --tasks tasks jobs/gate
+   ```
 
-Each stage's usual causes and fixes are in `references/check.md`.
-
-## Explore a running env
-
-To try calls before you write a task, serve the env with a directory that holds only a scratch
-task, which allows any change. Keep it out of `tasks/`: `check` fails on it.
-
-```yaml
-# explore/scratch.yaml
-instruction: Scratch task for trying calls.
-checks: [{name: any, weight: 1, sql: SELECT true}]
-any_change: true
-golden: [{tool: submit}]
-```
-
-```sh
-docker run --rm -d --name my-env -p 127.0.0.1:8000:8000 -e MIROIR_TOKEN=secret \
-  -v "$PWD/explore:/miroir/tasks:ro" my-env
-curl -s http://127.0.0.1:8000/health   # {"status":"healthy"} once ready
-```
-
-Play calls with the Python client, and read what changed and what the product sent. The
-product's MCP tools, if it has an MCP server, are stepped by name too; list them with
-`miroir.tools("http://127.0.0.1:8000", "secret", surface="mcp")`.
-
-```python
-import json
-from miroir import Session
-
-session = Session.lease(["http://127.0.0.1:8000"], token="secret", wait_busy=False)
-try:
-    session.reset("scratch")
-    for tool, arguments in [
-        ("api_docs", {}),
-        ("api_request", {"method": "PATCH", "path": "/deals/2001", "body": {"owner_id": 7}}),
-    ]:
-        print(json.dumps(session.step(tool, arguments)["observation"])[:2000])
-    outcome = session.finish()  # submits, grades and returns the record
-    record = outcome["record"]
-    print(json.dumps({"changes": record["changes"], "effects": record["effects"]}, indent=1))
-finally:
-    session.close()
-```
-
-After a run, the data stays as the episode left it until the next reset, so you can try a
-check's SQL on it:
-
-- On the app's database:
-  `docker exec my-env psql -h 127.0.0.1 -U postgres -d DB -tAc 'SELECT ...'`, or
-  `mysql -h 127.0.0.1 -u root DB -e '...'`. Keep these non-interactive: a file written outside
-  the state, such as a shell history, makes the env refuse resets, and the container must then
-  be replaced.
-- On the episode database, for `db: episode` checks: the image may lack `sqlite3`, so copy the
-  database out with its WAL files and query it on the host.
-
-```sh
-d=$(mktemp -d); for f in episode.db episode.db-wal episode.db-shm; do
-  docker cp "my-env:/miroir/$f" "$d/" 2>/dev/null; done
-sqlite3 "$d/episode.db" "SELECT tbl, op, columns FROM changes"
-```
+A probe that earns too much means the spec is too weak: fix the spec. A probe whose calls fail
+proves nothing: `miroir check` fails a solution that exits non-zero.
 
 ## Rules
 
-- Every process has a non-root `user`. Datastores come first, with `datastore: true`.
-- Everything the product writes is under `state`, or under `/tmp`, `/var/tmp`, `/dev/shm`,
-  `/var/log` or `/run`. A write anywhere else fails `writes`, and a served env refuses resets.
-- Nothing happens while the env idles: turn schedulers and cron off, wait for queues with
-  `quiet`, and list in `database.ignore` the columns the product touches on every request.
-- The env never needs the internet. Email and outbound HTTP go to the sinks, with canned
-  `responses` where the product reads a reply. Run `check` with `--network none`.
-- Commands are lists, `[program, arg, ...]`, run without a shell unless you write
-  `[sh, -c, "..."]`. Unknown fields are errors.
-- `database.url` connects as a user that can create triggers. The fixtures give the app's own
-  processes a role with only `SELECT, INSERT, UPDATE, DELETE`.
-- Dates move at every reset. List integer Unix-time columns in `database.time.epoch` and dates
-  that never move, such as birthdays, in `database.time.exclude`; move dates outside the
-  databases with `time.hook`.
-- Never weaken a probe or the golden run to pass `check`: fix the checks.
-- Never bake `MIROIR_TOKEN`, an import key or production data that is not scrubbed into an
-  image.
-- Serve on `127.0.0.1` with `MIROIR_TOKEN` set, and train on an internal network.
+1. Only `expose` ports listen off loopback. Bind datastores and everything else to 127.0.0.1; the
+   boot refuses any other listener.
+2. Read `after."<t>"`, `before."<t>"` and `answer`, not the JSON in `changes`.
+3. Let `allow` do row scope. What it forbids needs no gate.
+4. A check that doing nothing satisfies is a gate: the null run must score 0.
+5. Probes declare `harm` and a reward bound, and every HTTP call in a solution or probe uses
+   `curl -fsS`, or asserts the status it expects.
+6. Never weaken a probe or the reference solution to make validation pass.
+7. `environment/` is the same bytes in every task of a world; nothing per task reaches the world.
+8. Bump `[task].version`: minor for the spec or the grader image, major for the instruction, the
+   world or the environment, patch for solutions, probes and metadata.
+9. Pin all three images by digest when publishing: the world, `miroir-main` and `miroir`.
+10. Answers go to `/logs/artifacts/answer.txt`, as the instruction says.
+
+## Harbor mechanics
+
+Harbor's own [`create-task`](https://github.com/harbor-framework/harbor/tree/main/skills/create-task)
+and [`publish`](https://github.com/harbor-framework/harbor/tree/main/skills/publish) skills and
+its [docs](https://docs.harborframework.com) cover task directories, jobs, agents, regrades and
+the Hub. Miroir's tasks follow them, with a separate verifier from the `miroir` image and a
+collect hook in the world service.
