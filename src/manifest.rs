@@ -157,7 +157,8 @@ impl Manifest {
     pub fn load(path: &Path) -> Result<Manifest, ManifestError> {
         let file = path.display().to_string();
         let text = std::fs::read_to_string(path).map_err(|e| {
-            let fix = "a world image copies it there with COPY miroir.yaml /miroir/miroir.yaml";
+            let fix = "a world image copies it there with COPY miroir.yaml /miroir/miroir.yaml \
+                       and runs miroir as root, with USER root as its last USER";
             error(&file, format!("cannot read the manifest: {e}; {fix}"))
         })?;
         parse(&text, &file)
@@ -627,6 +628,8 @@ quiet: [su-exec, git, gitea, manager, flush-queues, --config, /etc/gitea/app.ini
         assert_eq!(error.field, path.display().to_string());
         assert!(error.message.starts_with("cannot read the manifest: "), "{error}");
         assert!(error.message.contains("COPY miroir.yaml /miroir/miroir.yaml"), "{error}");
+        let as_root = "and runs miroir as root, with USER root as its last USER";
+        assert!(error.message.ends_with(as_root), "{error}");
     }
 
     #[test]
