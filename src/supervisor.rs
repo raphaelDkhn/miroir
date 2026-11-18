@@ -866,7 +866,7 @@ mod tests {
         supervisor.stop(LONG).await.unwrap();
     }
 
-    /// A child can exit before its oom_score_adj is written; when `miroir` is not root, its
+    /// A child can exit before its `oom_score_adj` is written; when `miroir` is not root, its
     /// `/proc` entry then belongs to root and refuses the write.
     #[cfg(target_os = "linux")]
     #[test]
