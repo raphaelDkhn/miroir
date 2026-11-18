@@ -106,35 +106,29 @@ miroir check --tasks examples/gitea/datasets jobs/gitea-gate
 ```
 
 `check.yaml` runs every task with its reference solution, with an agent that does nothing, and
-with each of its probes. The grader passes when the reference solution scores reward 1 and
-harm 0 on all 120 tasks, doing nothing scores 0 and 0, every probe stays within its bounds with
-the harm it declares, and no trial voids or records a check error. Rerun the job in full after
-any change; Harbor's mean reward for it means nothing, `miroir check` is the verdict.
+with each of its probes. `miroir check` must then exit 0:
+[Validate and publish](https://miroir.mintlify.site/validate#trial-checks) lists
+what it holds each trial to.
 
 ## Run an agent
 
 ```bash
-harbor run -p examples/gitea/datasets/test -a claude-code -m anthropic/claude-sonnet-4-5 \
+harbor run -p examples/gitea/datasets/test -a claude-code -m anthropic/claude-sonnet-5-5 \
   -k 4 -n 8 --job-name gitea-eval
 miroir check jobs/gitea-eval
 ```
 
-Any Harbor agent with a shell works: the instruction holds the URL and the token. `miroir check`
-prints, per task and per agent, the mean reward, the harm rate, pass@1, pass^4 and a class.
+Any Harbor agent with a shell works: the instruction holds the URL and the token.
 
 ## Calibrate
 
-Run the agent you mean to train on the train split with at least two attempts per task, then
-read the classes:
+Before training, run the agent you mean to train on the train split, then train on the tasks
+whose class is `learnable` ([Calibrate](https://miroir.mintlify.site/train#calibrate)):
 
 ```bash
 harbor run -p examples/gitea/datasets/train -a <agent> -m <model> -k 4 --job-name gitea-calibrate
 miroir check --json jobs/gitea-calibrate
 ```
-
-A task is `solved` when every attempt scores 1, `unsolved` when every attempt scores the same
-value below 1, and `learnable` when the rewards differ. Only the learnable tasks give a GRPO
-group any signal.
 
 ## Fix a check and regrade
 
@@ -144,17 +138,16 @@ uv run examples/gitea/tasks.py …           # the command above
 harbor job regrade jobs/gitea-eval -p examples/gitea/datasets/test --job-name gitea-eval-2
 ```
 
-Regrading reuses the trials' evidence, so it runs only the verifiers and no agent. `VERSION` in
-`tasks.py` is every task's version: bump the minor for a grading change, which Harbor regrades;
-the major for an instruction or world change, which it reruns; the patch for solutions, probes
-and notes, which it reuses. `harbor run --diff jobs/gitea-eval …` then does the least work.
+Regrading reuses the trials' evidence, so it runs no agent. `VERSION` in `tasks.py` is every
+task's version; [Version bumps](https://miroir.mintlify.site/tasks#version-bumps)
+says which part to bump.
 
 ## Train
 
-`reward` is the training signal; `harm` is a metric. Not yet run: the commands below follow
-TRL's `examples/async_grpo_harbor` (AsyncGRPO through OpenEnv's `harbor_env`, which runs
-Harbor's own trials), and the TRL commit and OpenEnv release they run with will be pinned here
-after the first run. On a host with two GPUs and Docker, from that example's directory:
+Not yet run: the commands below follow TRL's `examples/async_grpo_harbor` (AsyncGRPO through
+OpenEnv's `harbor_env`, which runs Harbor's own trials), and the TRL commit and OpenEnv release
+they run with will be pinned here after the first run. On a host with two GPUs and Docker, from
+that example's directory:
 
 ```bash
 openenv harbor serve --dataset examples/gitea/datasets/train --port 8200 --capture-port 8300
@@ -164,11 +157,8 @@ CUDA_VISIBLE_DEVICES=1 python async_grpo_harbor.py --server http://localhost:820
   --harness mini-swe-agent --sandbox docker --reward-key reward --agent-step-limit 40 --max-steps 5
 ```
 
-What matters for Miroir: the tasks are read from local directories, `--sandbox docker` runs
-their compose services (the default, e2b, does not), the harness is a shell (no MCP), and
-`--reward-key reward` picks the training signal out of `{reward, harm}`. A trial the grader
-voided comes back with no reward and stays out of its group's baseline. Harm zeroes the reward
-but never makes it negative; for a penalty below 0, subtract it in the trainer (`reward - λ·harm`).
+[Train](https://miroir.mintlify.site/train#the-committed-recipe) says which of these
+flags matter to Miroir, and how harm and voids reach the trainer.
 
 ## Results
 
@@ -211,16 +201,12 @@ themselves.
   (4.0 s), and verifier 3.0 s (3.3 s). Over the gate job's 720 trials, 8 at a time, a trial took
   25.2 s (52.7 s): environment setup 14.1 s (33.1 s), agent 1.3 s (5.9 s), collection 4.8 s
   (9.3 s), verifier 5.1 s (10.1 s).
-- **Not run yet.** A cloud sandbox trial (Daytona gives a compose project 120 s to pull its
-  images and boot), and a frontier agent on the test split, which spends API credit: both wait
-  for the project owner's approval. Whether training on the train split improves held-out work
-  stays open: testing it needs the recipe above run on GPUs, which is paid and also waits for the
-  project owner's approval.
 
 ## Limitations
 
-- The worlds are generated, not taken from production data. Miroir's docs show how to build a
-  world from a production snapshot.
+- The worlds are generated, not taken from production data;
+  [From production](https://miroir.mintlify.site/environment#from-production) shows
+  how to build one from a snapshot.
 - The tasks are short workflows, not projects: their reference solutions make 2 to 16 requests
   to Gitea, the API description included.
 - Validation runs each grader on its reference solution, on doing nothing and on its probes. A

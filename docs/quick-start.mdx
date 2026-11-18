@@ -1,8 +1,10 @@
-# Quick start
+---
+title: "Quick start"
+description: "Build the test fixture, validate its graders through Harbor, and read a trial."
+---
 
-Build the test fixture, run its grader self-test through Harbor, and read the result. The
-fixture is Acme CRM, a small Node.js CRM with Postgres, Redis, a web server, a worker, an email
-queue and a payment API, with 7 tasks.
+The fixture is Acme CRM, a small Node.js CRM with Postgres, Redis, a web server, a worker, an
+email queue and a payment API, with 7 tasks.
 
 Requirements: Docker with buildx, [uv](https://docs.astral.sh/uv/) and Harbor 0.26.0.
 
@@ -11,7 +13,7 @@ uv tool install harbor==0.26.0
 git clone https://github.com/raphaelDkhn/miroir && cd miroir
 ```
 
-## 1. Build
+## Build
 
 ```bash
 docker buildx bake
@@ -38,7 +40,7 @@ It logs each process it starts, then `booted in 0.8 s: datastores 0.2, shift 0.0
 quiet 0.2`, and serves the CRM's API at `http://localhost:3000` (its description is at
 `/openapi.yaml`).
 
-## 2. Check the tasks
+## Check the tasks
 
 The `miroir` binary is Linux-only, so on any host it runs from its image. The alias mounts only
 the current directory, so every path you give it must lie under the current directory:
@@ -60,33 +62,20 @@ validation
   7 tasks, 0 trials, 0 skipped probe slots, 0 violations, 0 voids
 ```
 
-## 3. Run the grader self-test
+## Run the grader self-test
 
 [`fixtures/acme-crm/check.yaml`](https://github.com/raphaelDkhn/miroir/blob/master/fixtures/acme-crm/check.yaml)
 is a Harbor job config that runs every task four ways: with its reference solution (Harbor's
 `oracle` agent), with an agent that does nothing (`nop`), and with probes 1 and 2, wrong
-solutions that `SOLUTION=N` selects:
-
-```yaml
-n_concurrent_trials: 4
-datasets:
-  - path: fixtures/acme-crm/tasks
-agents:
-  - name: oracle
-  - name: nop
-  - {name: oracle, env: {SOLUTION: "1"}}
-  - {name: oracle, env: {SOLUTION: "2"}}
-```
+solutions that `SOLUTION=N` selects.
 
 ```bash
 harbor run -c fixtures/acme-crm/check.yaml --job-name quick-start
 miroir check --tasks fixtures/acme-crm/tasks jobs/quick-start
 ```
 
-The job ran its 28 trials, four at a time, in 57 s on the same host. Each trial is a fresh
-compose project: Harbor starts the world and the agent's container, runs the agent, has Miroir
-collect the evidence, and grades it in a separate container. Then `miroir check` holds every
-trial to what it must score:
+The job ran its 28 trials, four at a time, in 57 s on the same host, and `miroir check` held
+each trial to what it must score:
 
 ```text
 validation
@@ -100,13 +89,17 @@ validation
   7 tasks, 21 trials, 7 skipped probe slots, 0 violations, 0 voids
 ```
 
-The reference solution scored reward 1 and harm 0 on every task, doing nothing scored 0 and 0,
-and every probe stayed within the bounds and harm its task declares. Tasks with fewer than N
-probes still ran the `SOLUTION=N` slot; `miroir check` skips those 7 trials. Harbor's own summary
-of this job pools the reference runs and the probes into one `oracle` mean, which means nothing
-here: `miroir check` is the verdict.
+`golden ok` means the reference solution scored reward 1 and harm 0, `nop ok` that doing nothing
+scored 0 and 0, and `probe N ok` that the probe stayed within the bounds and harm its task
+declares. Tasks with fewer than N probes still ran the `SOLUTION=N` slot; `miroir check` skips
+those 7 trials.
 
-## 4. Read a trial
+<Note>
+  Ignore the means Harbor prints for this job: they pool the reference runs and the probes.
+  `miroir check` is the verdict.
+</Note>
+
+## Read a trial
 
 Every trial directory holds Harbor's record of it: `result.json`, the evidence under
 `artifacts/miroir/evidence/`, and the grader's output under `verifier/`. Harbor's viewer shows
@@ -139,26 +132,22 @@ Both checks pass, since the right invoice was paid, but the probe changed a row 
 admits, so the trial scores harm 1 and reward 0. The reference run of the same task scores
 `reward 1.00  harm 0`.
 
-## 5. Run an agent
+## Run an agent
 
-Not run here, since it spends model API credit: any Harbor agent with a shell works, because the
-instruction holds the API's URL and a test credential.
+Any Harbor agent with a shell works, because the instruction holds the API's URL and a test
+credential.
+
+<Note>Not run for these docs: it spends model API credit.</Note>
 
 ```bash
-harbor run -p fixtures/acme-crm/tasks -a claude-code -m anthropic/claude-sonnet-4-5 -k 2 \
+harbor run -p fixtures/acme-crm/tasks -a claude-code -m anthropic/claude-sonnet-5-5 -k 2 \
   --job-name agent
 miroir check jobs/agent
 ```
 
 `miroir check` then prints, per task, the mean reward, the harm rate, pass@1, pass^2 and a class
-([Validate and publish](validate.md#miroir-check)).
+([Agent runs](/validate#agent-runs)).
 
 For a realistic dataset, the [Gitea example](https://github.com/raphaelDkhn/miroir/tree/master/examples/gitea)
 builds three worlds of stock Gitea, generates 120 tasks, validates them and runs an agent on the
 held-out test split.
-
-## Next
-
-- [Wrap a product](environment.md) as a world of your own.
-- [Write tasks](tasks.md), and draft their specs with `miroir draft`.
-- [Validate and publish](validate.md) a dataset.

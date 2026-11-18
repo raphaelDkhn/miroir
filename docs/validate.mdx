@@ -1,4 +1,7 @@
-# Validate and publish
+---
+title: "Validate and publish"
+description: "Hold every grader to its reference solution, its null run and its probes, then publish the dataset."
+---
 
 A grader is validated before any agent runs on it: the reference solution must score reward 1
 and harm 0, doing nothing must score 0 and 0, and every probe must stay within the reward bounds
@@ -37,8 +40,10 @@ those with fewer than N probes: 7 of the fixture's 28 trials, which `miroir chec
 two or more attempts (`-k 2`), the reference solution, doing nothing and each probe must also
 score the same in every attempt; a probe whose attempts differ fails even inside its bounds.
 
-Rerun a check job in full after any change, never with `harbor run --diff`: a change to a
-solution or a probe is a patch bump, which `--diff` would reuse.
+<Warning>
+  Rerun a check job in full after any change, never with `harbor run --diff`: a change to a
+  solution or a probe is a patch bump, which `--diff` would reuse.
+</Warning>
 
 Ignore Harbor's means for a check job. Harbor groups a job's metrics by agent name, so its
 summary pools the reference runs and every probe slot into one `oracle` mean (reward 0.333 and
@@ -50,9 +55,8 @@ harm 0.333 for the fixture). `miroir check` is the verdict.
 miroir check [--tasks DIR]... [--json] [JOB_DIR]...
 ```
 
-It runs on the host, from the `miroir` image through the alias of the
-[quick start](quick-start.md#2-check-the-tasks), which mounts only the current directory: every
-`--tasks` and job path must lie under it. Harbor's default jobs directory, `./jobs`, does.
+It runs on the host through the [quick start's alias](/quick-start#check-the-tasks), so every
+`--tasks` and job path must lie under the current directory, as Harbor's `./jobs` does.
 
 ### Static task checks
 
@@ -138,7 +142,7 @@ agents
     …
 ```
 
-[Train](train.md#calibrate) uses the classes to pick tasks.
+[Train](/train#calibrate) uses the classes to pick tasks.
 
 ### JSON
 
@@ -186,13 +190,12 @@ harbor job regrade jobs/gate -p fixtures/acme-crm/tasks --job-name gate-2
 miroir check --tasks fixtures/acme-crm/tasks jobs/gate-2
 ```
 
-For an evaluation, `harbor run --diff` does the least work after edits: it reruns tasks whose
-major version changed, regrades those whose minor changed, reuses the rest, and refuses a task
-whose contents changed with no bump ([version bumps](tasks.md#version-bumps)). With an agent
-(not run here, since it spends model API credit):
+For an evaluation, `harbor run --diff` reruns, regrades or reuses each task by its
+[version bump](/tasks#version-bumps). With an agent (not run here, since it spends model API
+credit):
 
 ```bash
-harbor run --diff jobs/eval -p tasks -a claude-code -m anthropic/claude-sonnet-4-5
+harbor run --diff jobs/eval -p tasks -a claude-code -m anthropic/claude-sonnet-5-5
 ```
 
 Both are Harbor's: see [Regrade](https://docs.harborframework.com/jobs/regrade).
@@ -200,8 +203,9 @@ Both are Harbor's: see [Regrade](https://docs.harborframework.com/jobs/regrade).
 ## Publish
 
 Publishing is Harbor's ([Publish](https://docs.harborframework.com/harbor-hub/publish)); what
-Miroir adds is pinning the images and the check job. The image push, `harbor auth login` and
-`harbor publish` were not run for these docs.
+Miroir adds is pinning the images and the check job.
+
+<Note>The image push, `harbor auth login` and `harbor publish` were not run for these docs.</Note>
 
 ```bash
 docker buildx build --push -t ghcr.io/me/my-env:1.0.0 -f Dockerfile.miroir .
@@ -223,10 +227,7 @@ harbor publish tasks -t 1.0.0 --public       # private without --public; --publi
   `config --no-env-resolution`. An older Compose makes it report `invalid-task-config` for every
   task, so check for the flag first, as above. Pass the task directories (`tasks/*/`), never
   their parent: lint reads each argument as one task.
-- `harbor dataset init` writes `dataset.toml` and adds the task directories below it;
-  `harbor dataset add --scan` adds the ones created since. `harbor publish` takes a directory
-  holding a `dataset.toml` and publishes the tasks it lists; runs then use the published name,
-  `harbor run -d me/my-env@1.0.0`.
+- Runs then use the published name: `harbor run -d me/my-env@1.0.0`.
 - The release images of the grader and the agent's container are
   `ghcr.io/raphaeldkhn/miroir` and `ghcr.io/raphaeldkhn/miroir-main`, tagged `<major>.<minor>`
   and `<major>.<minor>.<patch>`.
@@ -252,5 +253,4 @@ Run on every change to the world or the tasks, and with `-k 2` before a release:
 Miroir's own gate,
 [`tests/e2e.sh`](https://github.com/raphaelDkhn/miroir/blob/master/tests/e2e.sh), does this for
 the fixture, then also regrades the job with a changed spec and checks that a trial without
-evidence voids. It needs Harbor 0.26.0 and jq, and keeps its work under `jobs/`. On a Compose
-older than 2.35.0 it skips lint with a message, or fails when `CI` is set.
+evidence voids.

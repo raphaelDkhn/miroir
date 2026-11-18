@@ -1,4 +1,7 @@
-# Train
+---
+title: "Train"
+description: "The reward contract, calibration, and the trainers that run Miroir tasks."
+---
 
 Miroir adds no training code. Every trainer below runs Harbor task directories itself; what
 Miroir gives it is the reward contract, voids it can recognize, and calibration with
@@ -18,7 +21,7 @@ The grader writes `/logs/verifier/reward.json` with two keys, always both, finit
   mean over a job is the harm rate.
 - A void writes no reward file and exits 75. Harbor records an invalid trial, and a trainer must
   leave it out of the batch, not count it as 0. A trial voids only for Miroir's own failures,
-  such as a broken spec or missing evidence ([Outcomes](validate.md#outcomes)).
+  such as a broken spec or missing evidence ([Outcomes](/validate#outcomes)).
 - `reward-details.json`, next to it, holds every check's score and the out-of-scope changes.
 
 Harm zeroes `reward` but never makes it negative. A trainer that wants a penalty below 0 composes
@@ -33,9 +36,8 @@ attempts per task, then keep the tasks whose rewards differ between attempts:
 miroir check --json jobs/<job> | jq -r '.agents[].tasks[] | select(.class == "learnable") | .task'
 ```
 
-A task is `solved` when every attempt scores 1, `unsolved` when every attempt scores the same
-value below 1, and `learnable` when the rewards differ. A task that scores 0.6 every time is
-`unsolved`: its rewards have no variance, so a GRPO group gives it no advantage. Harbor runs a
+Those are the `learnable` tasks ([classes](/validate#agent-runs)). A task that scores the same
+every time, even 0.6, has no reward variance, so a GRPO group gives it no advantage. Harbor runs a
 subset with `-i <task name>` (repeatable) or a job config's `datasets[].task_names`
 ([job configs](https://docs.harborframework.com/jobs/configs)).
 
@@ -43,10 +45,16 @@ subset with `-i <task name>` (repeatable) or a job config's `datasets[].task_nam
 
 The recipe is TRL's own example, `examples/async_grpo_harbor/async_grpo_harbor.py`: AsyncGRPO
 through OpenEnv's `harbor_env`, which runs Harbor's own trials, on a host with two GPUs and
-Docker, over the Gitea example's train split. It is not yet run: its exact commands, pinned to
-the TRL commit and OpenEnv release they ran with, go in the Gitea example's
-[Train section](https://github.com/raphaelDkhn/miroir/blob/master/examples/gitea/README.md#train)
-after the first run. What matters to Miroir in it:
+Docker, over the Gitea example's train split.
+
+<Note>
+  Not yet run. Its exact commands, pinned to the TRL commit and OpenEnv release they ran with, go
+  in the Gitea example's
+  [Train section](https://github.com/raphaelDkhn/miroir/blob/master/examples/gitea/README.md#train)
+  after the first run.
+</Note>
+
+What matters to Miroir in it:
 
 - the tasks are read from local task directories, with no publishing;
 - `--sandbox docker` runs their compose services (the default, e2b, does not);

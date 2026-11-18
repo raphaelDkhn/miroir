@@ -45,10 +45,14 @@ image, and `grade` inside the grader's; none of them runs on the host.
 | turn a product into a world, or fix a bake or a boot | `references/environment.md` |
 | write or fix a task, its spec or its probes | `references/tasks.md` |
 | generate many tasks | `references/tasks.md`, "Generate tasks" |
-| validate graders, read `miroir check` output | [Validate and publish](https://raphaeldkhn.github.io/miroir/validate.html) |
-| publish a dataset | [Validate and publish](https://raphaeldkhn.github.io/miroir/validate.html#publish), then Harbor's `publish` skill |
-| train, or pick tasks to train on | [Train](https://raphaeldkhn.github.io/miroir/train.html) |
+| validate graders, read `miroir check` output | [Validate and publish](https://miroir.mintlify.site/validate) |
+| publish a dataset | [Validate and publish](https://miroir.mintlify.site/validate#publish), then Harbor's `publish` skill |
+| train, or pick tasks to train on | [Train](https://miroir.mintlify.site/train) |
 | turn a production snapshot or a ticket into a world or a task | `references/environment.md`, "From production" |
+
+The two references are pages of the docs at https://miroir.mintlify.site. A link in them such as
+`/validate#outcomes` is a path on that site, and `/tasks` and `/environment` are the references
+themselves.
 
 Look before you write. Find `miroir.yaml`, `Dockerfile.miroir`, task directories whose
 `task.toml` holds `MIROIR_SPEC`, and `check.yaml`; then the product's own Dockerfile or compose
