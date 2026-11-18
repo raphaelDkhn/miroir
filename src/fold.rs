@@ -12,10 +12,11 @@ use crate::pg::{Ignore, LogRow, Table};
 type Row = Map<String, Value>;
 
 /// The net changes of `log` against `tables`, the boot catalog (`catalog.json`); each
-/// `NetChange::tbl` is `Table::evidence_name`. Truncates come first, then keyed rows by table
-/// and key, then the rows of keyless tables, which count as a multiset: one change per net
-/// instance. An error is Miroir's own failure: a log row naming a table the boot catalog lacks,
-/// an unknown op, or an image that is not a JSON object.
+/// `NetChange::tbl` is `Table::evidence_name`. Truncates come first, then keyed rows by table, in
+/// the order the log first touched each, so that the n-th insert into a table is the n-th the
+/// product made whatever key it gave it; then the rows of keyless tables, which count as a
+/// multiset: one change per net instance. An error is Miroir's own failure: a log row naming a
+/// table the boot catalog lacks, an unknown op, or an image that is not a JSON object.
 pub fn fold(log: &[LogRow], tables: &[Table], ignore: &Ignore) -> Result<Vec<NetChange>, String> {
     let keys = primary_keys(tables);
     let mut folding = Folding::default();
@@ -59,6 +60,8 @@ pub fn schema_changes(boot: &[Table], now: &[Table], ignore: &Ignore) -> Vec<Net
 
 /// A keyed row as the episode found it and as it left it.
 struct Entry {
+    /// The number of the step that first touched the row.
+    first: usize,
     pk: Row,
     before: Option<Row>,
     after: Option<Row>,
@@ -69,6 +72,8 @@ struct Entry {
 struct Folding {
     /// Keyed rows by table and key.
     entries: BTreeMap<(String, String), Entry>,
+    /// The steps of keyed rows folded so far.
+    steps: usize,
     /// The net count of each distinct keyless row, by table and row text.
     counts: BTreeMap<(String, String), (i64, Row)>,
     /// Tables in the order of their first truncate.
@@ -128,8 +133,14 @@ impl Folding {
         let Some(row) = old.as_ref().or(new.as_ref()) else { return };
         let pk = key(pk, row);
         let id = (tbl.to_string(), serde_json::to_string(&pk).unwrap_or_default());
-        let entry =
-            self.entries.entry(id).or_insert_with(|| Entry { pk, before: old.clone(), after: old });
+        self.steps += 1;
+        let first = self.steps;
+        let entry = self.entries.entry(id).or_insert_with(|| Entry {
+            first,
+            pk,
+            before: old.clone(),
+            after: old,
+        });
         entry.after = new;
     }
 
@@ -145,7 +156,9 @@ impl Folding {
                 columns: None,
             });
         }
-        for ((tbl, _), entry) in self.entries {
+        let keyed: BTreeMap<(String, usize), Entry> =
+            self.entries.into_iter().map(|((tbl, _), entry)| ((tbl, entry.first), entry)).collect();
+        for ((tbl, _), entry) in keyed {
             changes.extend(net_change(tbl, entry));
         }
         for ((tbl, _), (net, row)) in self.counts {
@@ -492,7 +505,29 @@ mod tests {
             after: Some(object(note(5, "new"))),
             ..deleted.clone()
         };
-        assert_eq!(changes, [deleted, inserted], "ordered by table, then key");
+        assert_eq!(
+            changes,
+            [inserted, deleted],
+            "by table, in the order the log first touched each"
+        );
+    }
+
+    /// Draft matches the n-th insert into a table across runs, whose keys may differ: by key, 100
+    /// would sort before 99, and random keys at random.
+    #[test]
+    fn keyed_rows_keep_the_order_the_log_first_touched_them() {
+        let tables = [table("notes", &["id"], &["id", "text"])];
+        let note = |id: i64, text: &str| json!({"id": id, "text": text});
+        let rows = [
+            log("notes", "insert", None, Some(note(99, "first"))),
+            log("notes", "insert", None, Some(note(100, "second"))),
+            log("notes", "update", Some(note(99, "first")), Some(note(99, "edited"))),
+            log("notes", "insert", None, Some(note(98, "third"))),
+        ];
+        let changes = fold(&rows, &tables, &Ignore::default()).unwrap();
+        let texts: Vec<&str> =
+            changes.iter().map(|c| c.after.as_ref().unwrap()["text"].as_str().unwrap()).collect();
+        assert_eq!(texts, ["edited", "second", "third"]);
     }
 
     /// A check compares a value with the literal the database holds, so every double must read
