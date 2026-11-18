@@ -58,7 +58,7 @@ printf '%s' "$STUB_OK"
 # add one here only once Gitea's schema has it.
 CAPTURED = {
     "access": ["id", "user_id", "repo_id", "mode"],
-    "branch": ["id"],
+    "branch": ["id", "repo_id"],
     "collaboration": ["id", "repo_id", "user_id", "mode"],
     "comment": [
         "id",
@@ -80,9 +80,9 @@ CAPTURED = {
         "updated_unix",
     ],
     "issue_assignees": ["id", "assignee_id", "issue_id"],
-    "issue_content_history": ["id"],
+    "issue_content_history": ["id", "comment_id"],
     "issue_label": ["id", "issue_id", "label_id"],
-    "label": ["id", "num_issues", "num_closed_issues", "updated_unix"],
+    "label": ["id", "repo_id", "num_issues", "num_closed_issues", "updated_unix"],
     "milestone": [
         "id",
         "is_closed",
@@ -92,9 +92,18 @@ CAPTURED = {
         "num_closed_issues",
         "updated_unix",
     ],
-    "org_user": ["id"],
+    "org_user": ["id", "uid", "org_id"],
     "pull_request": ["id", "issue_id", "has_merged"],
-    "release": ["id", "repo_id", "tag_name", "title", "note", "is_draft", "is_prerelease"],
+    "release": [
+        "id",
+        "repo_id",
+        "tag_name",
+        "target",
+        "title",
+        "note",
+        "is_draft",
+        "is_prerelease",
+    ],
     "repository": [
         "id",
         "num_watches",
@@ -108,7 +117,7 @@ CAPTURED = {
     "team": ["id", "num_members"],
     "team_user": ["id", "uid"],
     "user": ["id", "num_members"],
-    "watch": ["id"],
+    "watch": ["id", "user_id"],
     "webhook": ["id", "repo_id", "url", "is_active", "content_type", "secret", "events"],
 }
 # The evidence of an episode that did nothing, as the grader reads it: no change, no effect and
@@ -126,6 +135,8 @@ INSERT INTO answer VALUES (NULL, NULL, NULL);
 """
 # The images an allow entry's `where` is evaluated on, by op.
 IMAGES = {"insert": ["after"], "update": ["after", "before"], "delete": ["before"]}
+# Columns besides the num_* counts that Gitea derives from other rows.
+DERIVED = {"completeness", "git_size", "size", "updated_unix"}
 
 
 def load_generator() -> ModuleType:
@@ -286,6 +297,20 @@ def test_specs_compile_and_doing_nothing_earns_nothing(built) -> None:
                     f'SELECT _change FROM {image}."{entry["table"]}" '
                     f"WHERE _op = '{entry['op']}' AND (\n{entry['where']}\n)"
                 )
+
+
+def test_scope_names_the_rows_a_task_may_change(built) -> None:
+    """An allow entry without `where` admits its change on every row of the table, so it may
+    only update what Gitea keeps in step with other rows: counts, sizes and update times."""
+    _, tasks = built
+    for task in tasks:
+        for entry in task["spec"]["allow"]:
+            if "where" in entry:
+                continue
+            columns = entry.get("columns", [])
+            assert entry["op"] == "update" and columns, (task["id"], entry)
+            derived = [c for c in columns if c.startswith("num_") or c in DERIVED]
+            assert derived == columns, (task["id"], entry)
 
 
 def test_answers_are_unambiguous(built) -> None:
@@ -695,7 +720,7 @@ def test_the_compose_file_puts_the_world_on_a_network_with_no_way_out(generated)
 
 def test_every_script_is_valid_bash(generated) -> None:
     scripts = sorted(generated.glob("*/*/solution/*.sh"))
-    assert len(scripts) == 420
+    assert len(scripts) == 120 + 336
     for script in scripts:
         done = subprocess.run(["bash", "-n", str(script)], check=False, capture_output=True)
         assert done.returncode == 0, (script, done.stderr)

@@ -38,7 +38,7 @@ import worlds
 # One version for every task and dataset. Bump the major when instructions or worlds change
 # (Harbor reruns), the minor when a spec or the grader image does (it regrades), and the patch
 # when only solutions, probes or notes do (it reuses the trials).
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 MARKER = ".generated"
 IDS = "/opt/gitea-env/ids.json"
 SERVICE = "gitea"
