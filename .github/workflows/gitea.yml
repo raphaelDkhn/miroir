@@ -1,0 +1,153 @@
+name: Gitea
+
+# The Gitea gate: build the three worlds, generate their tasks, and run every task's reference
+# solution, nop and probes through Harbor. Run with `publish` on a release tag, it then pushes the
+# gated worlds and publishes the three splits to Harbor Hub, every image pinned by digest.
+on:
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: After the gate, push the worlds and publish the datasets (needs a release tag)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  DATASETS: examples/gitea/datasets
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Publishing runs on a release tag
+        if: inputs.publish && github.ref_type != 'tag'
+        run: |
+          echo "::error::run on a release tag (vX.Y.Z) to publish: the tasks pin its miroir images"
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          enable-cache: false
+      - run: uv tool install harbor==0.26.0
+      - run: docker buildx bake miroir main gitea
+      - name: Generate the tasks
+        run: >-
+          uv run --python 3.12 examples/gitea/tasks.py --out "$DATASETS"
+          --world orbit=gitea-env:orbit --world ferry=gitea-env:ferry
+          --world kestrel=gitea-env:kestrel --main miroir-main:dev --grader miroir:dev
+      - name: Static checks
+        run: docker run --rm -v "$PWD:$PWD" -w "$PWD" miroir:dev miroir check --tasks "$DATASETS"
+      - name: harbor lint
+        run: |
+          if ! grep -q -- --no-env-resolution <<<"$(docker compose config --help)"; then
+            echo "::error::this Docker Compose lacks 'config --no-env-resolution', so harbor lint" \
+              "cannot check the compose image: update Docker Compose to 2.35 or later"
+            exit 1
+          fi
+          harbor lint "$DATASETS"/*/*/
+      - name: The reference solution, doing nothing and every probe of every task
+        run: harbor run -c examples/gitea/check.yaml -n 8 -y --job-name gitea-gate
+      - name: Validate the job
+        run: >-
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" miroir:dev
+          miroir check --tasks "$DATASETS" jobs/gitea-gate
+      - name: Save the gated worlds for publishing
+        if: inputs.publish
+        run: >-
+          docker save -o "$RUNNER_TEMP/worlds.tar"
+          gitea-env:orbit gitea-env:ferry gitea-env:kestrel
+      - if: inputs.publish
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: worlds
+          path: ${{ runner.temp }}/worlds.tar
+          retention-days: 1
+
+  publish:
+    needs: gate
+    if: inputs.publish
+    runs-on: ubuntu-24.04
+    # Its required reviewers approve each publish; it holds the HARBOR_API_KEY secret.
+    environment: harbor-hub
+    permissions:
+      contents: read
+      packages: write  # the world images on GHCR
+    steps:
+      # GitHub creates a missing environment unprotected; without its secret, nothing is pushed.
+      - name: The harbor-hub environment holds HARBOR_API_KEY
+        env:
+          HARBOR_API_KEY: ${{ secrets.HARBOR_API_KEY }}
+        run: |
+          if [ -z "$HARBOR_API_KEY" ]; then
+            echo "::error::create the harbor-hub environment, with required reviewers and the" \
+              "HARBOR_API_KEY secret, before publishing"
+            exit 1
+          fi
+      - name: Docker Compose lets harbor lint below check the compose images' pins
+        run: |
+          if ! grep -q -- --no-env-resolution <<<"$(docker compose config --help)"; then
+            echo "::error::this Docker Compose lacks 'config --no-env-resolution', so harbor lint" \
+              "cannot check the compose image: update Docker Compose to 2.35 or later"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          enable-cache: false
+      - run: uv tool install harbor==0.26.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: worlds
+          path: ${{ runner.temp }}
+      - run: docker load -i "$RUNNER_TEMP/worlds.tar"
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550  # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # The release's images are looked up first, so a missing release pushes nothing.
+      - name: Push the worlds, then generate the tasks with every image pinned by digest
+        run: |
+          digest() { # REF: the digest the registry holds for REF
+            local manifest
+            manifest=$(docker buildx imagetools inspect "$1" --format '{{json .Manifest}}')
+            jq -er .digest <<<"$manifest"
+          }
+          release=${GITHUB_REF_NAME#v}
+          main="ghcr.io/raphaeldkhn/miroir-main:$release"
+          main="$main@$(digest "$main")"
+          grader="ghcr.io/raphaeldkhn/miroir:$release"
+          grader="$grader@$(digest "$grader")"
+          worlds=()
+          for world in orbit ferry kestrel; do
+            ref="ghcr.io/raphaeldkhn/miroir-gitea:$release-$world"
+            docker tag "gitea-env:$world" "$ref"
+            docker push "$ref"
+            pinned="$ref@$(digest "$ref")"
+            worlds+=(--world "$world=$pinned")
+          done
+          uv run --python 3.12 examples/gitea/tasks.py --out "$DATASETS" "${worlds[@]}" \
+            --main "$main" --grader "$grader"
+      - run: harbor lint --extend-select unpinned-image "$DATASETS"/*/*/
+      - name: Publish the three splits
+        env:
+          HARBOR_API_KEY: ${{ secrets.HARBOR_API_KEY }}
+        run: |
+          version=$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' examples/gitea/tasks.py)
+          if [ -z "$version" ]; then
+            echo "::error::examples/gitea/tasks.py holds no line VERSION = \"X.Y.Z\""
+            exit 1
+          fi
+          for split in train validation test; do
+            harbor dataset add --scan "$DATASETS/$split" --to "$DATASETS/$split"
+            # --public asks for confirmation on stdin, once per dataset.
+            echo y | harbor publish "$DATASETS/$split" --public -t "$version"
+          done

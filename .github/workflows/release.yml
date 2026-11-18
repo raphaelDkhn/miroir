@@ -15,11 +15,11 @@ jobs:
     needs: ci
     runs-on: ubuntu-24.04
     permissions:
-      contents: write
-      packages: write
+      contents: write  # the GitHub release
+      packages: write  # the images on GHCR
     env:
       IMAGE: ghcr.io/raphaeldkhn/miroir
-      SANDBOX_IMAGE: ghcr.io/raphaeldkhn/miroir-sandbox
+      MAIN_IMAGE: ghcr.io/raphaeldkhn/miroir-main
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -28,33 +28,39 @@ jobs:
       - name: Build the static binaries
         run: |
           for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
-            uvx --from cargo-zigbuild==0.24.0 cargo-zigbuild zigbuild \
+            uvx --from cargo-zigbuild==0.24.0 --with ziglang==0.17.1 cargo-zigbuild zigbuild \
               --release --locked --target "$target"
           done
           mkdir -p dist
           cp target/x86_64-unknown-linux-musl/release/miroir dist/miroir-amd64
           cp target/aarch64-unknown-linux-musl/release/miroir dist/miroir-arm64
           (cd dist && sha256sum miroir-* > SHA256SUMS)
+      - name: The binary's version is the tag's
+        run: |
+          built=$(dist/miroir-amd64 --version)
+          if [ "$built" != "miroir ${GITHUB_REF_NAME#v}" ]; then
+            echo "::error::$GITHUB_REF_NAME holds $built: set Cargo.toml's version, then tag again"
+            exit 1
+          fi
       - name: Image tags
         id: tags
         run: |
           version="${GITHUB_REF_NAME#v}"
           if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             tags="$IMAGE:$version,$IMAGE:${version%.*}"
-            sandbox_tags="$SANDBOX_IMAGE:$version,$SANDBOX_IMAGE:${version%.*}"
+            main_tags="$MAIN_IMAGE:$version,$MAIN_IMAGE:${version%.*}"
             prerelease=false
           else
             tags="$IMAGE:$version"
-            sandbox_tags="$SANDBOX_IMAGE:$version"
+            main_tags="$MAIN_IMAGE:$version"
             prerelease=true
           fi
           {
             echo "tags=$tags"
-            echo "sandbox_tags=$sandbox_tags"
+            echo "main_tags=$main_tags"
             echo "prerelease=$prerelease"
-            echo "version=$version"
           } >> "$GITHUB_OUTPUT"
-      # The sandbox image runs apt-get for arm64, which an amd64 runner can only do under QEMU.
+      # Both images run their package manager for arm64, which an amd64 runner does under QEMU.
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0
         with:
           platforms: arm64
@@ -73,35 +79,13 @@ jobs:
           tags: ${{ steps.tags.outputs.tags }}
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
-          context: sandbox
+          context: .
+          file: main.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: MIROIR_IMAGE=${{ env.IMAGE }}:${{ steps.tags.outputs.version }}
-          tags: ${{ steps.tags.outputs.sandbox_tags }}
+          tags: ${{ steps.tags.outputs.main_tags }}
       - name: GitHub release with the binaries
         env:
           GH_TOKEN: ${{ github.token }}
           PRERELEASE: ${{ steps.tags.outputs.prerelease }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --prerelease="$PRERELEASE"
-
-  pypi:
-    needs: release
-    # PEP 440 spells prereleases differently from these tags, so only X.Y.Z tags reach PyPI.
-    if: ${{ !contains(github.ref_name, '-') }}
-    runs-on: ubuntu-24.04
-    environment:
-      name: pypi
-      url: https://pypi.org/p/miroir
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
-      - name: The tag is the package's version
-        working-directory: python
-        run: test "$(uv version --short)" = "${GITHUB_REF_NAME#v}"
-      - run: uv build --out-dir dist python
-      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3

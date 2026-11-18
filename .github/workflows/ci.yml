@@ -19,14 +19,53 @@ env:
 jobs:
   lint:
     runs-on: ubuntu-24.04
+    env:
+      ACTIONLINT_URL: https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      SHELLCHECK_URL: https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.gz
+      SHELLCHECK_SHA256: b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6
+      SHFMT_URL: https://github.com/mvdan/sh/releases/download/v3.14.1/shfmt_v3.14.1_linux_amd64
+      SHFMT_SHA256: 76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          enable-cache: false
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: shellcheck sandbox/*.sh python/tests/*.sh
+      - name: Install actionlint, shellcheck and shfmt
+        run: |
+          bin="$RUNNER_TEMP/bin"
+          mkdir -p "$bin"
+          curl -fsSL "$ACTIONLINT_URL" -o "$RUNNER_TEMP/actionlint.tar.gz"
+          curl -fsSL "$SHELLCHECK_URL" -o "$RUNNER_TEMP/shellcheck.tar.gz"
+          curl -fsSL "$SHFMT_URL" -o "$bin/shfmt"
+          sha256sum -c - <<EOF
+          $ACTIONLINT_SHA256  $RUNNER_TEMP/actionlint.tar.gz
+          $SHELLCHECK_SHA256  $RUNNER_TEMP/shellcheck.tar.gz
+          $SHFMT_SHA256  $bin/shfmt
+          EOF
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$bin" actionlint
+          tar -xzf "$RUNNER_TEMP/shellcheck.tar.gz" -C "$bin" --strip-components 1 \
+            shellcheck-v0.11.0/shellcheck
+          chmod +x "$bin/shfmt"
+          echo "$bin" >> "$GITHUB_PATH"
+      - run: shellcheck tests/*.sh fixtures/acme-crm/tasks/*/solution/*.sh
+      - run: shfmt -i 2 -d tests/*.sh fixtures/acme-crm/tasks/*/solution/*.sh
+      - run: uvx ruff==0.17.3 check examples
+      - run: uvx ruff==0.17.3 format --check examples
+      # ty resolves imports from a real environment, with the world image's Python 3.12.
+      - name: ty
+        run: |
+          uv venv -q --python 3.12 "$RUNNER_TEMP/venv"
+          uv pip install -q --python "$RUNNER_TEMP/venv" pyyaml==6.0.3 pytest==9.2.0
+          uvx ty==0.0.96 check --error-on-warning --python "$RUNNER_TEMP/venv" \
+            --extra-search-path examples/gitea/seed examples/gitea
+      - run: actionlint
+      - run: uvx zizmor==1.32.0 .github/workflows/
 
   test:
     runs-on: ubuntu-24.04
@@ -35,48 +74,15 @@ jobs:
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          enable-cache: false
       - run: cargo test --locked
-
-  python:
-    runs-on: ubuntu-24.04
-    env:
-      UV_PYTHON: "3.13"
-    defaults:
-      run:
-        working-directory: python
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
-      - run: uv run --locked ruff format --check .
-      - run: uv run --locked ruff check .
-      - run: uv run --locked ty check
-      - run: uv run --locked pytest -q
-      - run: uv build
-      - name: The Gitea example's worlds and task families
-        working-directory: examples/gitea/seed
-        run: uv run --no-project --with pyyaml==6.0.3 --with pytest==9.2.0 pytest -q
-      - run: >-
-          uv export --locked --all-extras --no-dev --no-emit-project --format requirements-txt
-          -o "$RUNNER_TEMP/requirements.txt"
-      - run: uvx pip-audit==2.10.1 --disable-pip --no-deps -r "$RUNNER_TEMP/requirements.txt"
-
-  docs:
-    runs-on: ubuntu-24.04
-    env:
-      MDBOOK_URL: https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-gnu.tar.gz
-      MDBOOK_SHA256: 3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - run: curl -fsSL "$MDBOOK_URL" -o "$RUNNER_TEMP/mdbook.tar.gz"
-      - run: echo "$MDBOOK_SHA256  $RUNNER_TEMP/mdbook.tar.gz" | sha256sum -c -
-      - run: tar -xzf "$RUNNER_TEMP/mdbook.tar.gz" -C "$RUNNER_TEMP"
-      - run: '"$RUNNER_TEMP/mdbook" build docs'
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
-      - run: uvx --from skills-ref==0.1.1 agentskills validate skills/miroir
+      - name: The Gitea generator's tests, with the world image's Python 3.12
+        run: |
+          uv venv -q --python 3.12 "$RUNNER_TEMP/venv"
+          uv pip install -q --python "$RUNNER_TEMP/venv" pyyaml==6.0.3 pytest==9.2.0
+          "$RUNNER_TEMP/venv/bin/pytest" -q examples/gitea/seed
 
   supply-chain:
     runs-on: ubuntu-24.04
@@ -93,6 +99,8 @@ jobs:
       matrix:
         target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
     runs-on: ubuntu-24.04
+    env:
+      TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -101,13 +109,32 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          enable-cache: false
       - run: >-
-          uvx --from cargo-zigbuild==0.24.0 cargo-zigbuild zigbuild
-          --release --locked --target "${{ matrix.target }}"
-      - run: file "target/${{ matrix.target }}/release/miroir" | grep 'statically linked'
+          uvx --from cargo-zigbuild==0.24.0 --with ziglang==0.17.1 cargo-zigbuild zigbuild
+          --release --locked --target "$TARGET"
+      - run: file "target/$TARGET/release/miroir" | grep 'statically linked'
 
-  integration:
-    needs: [lint, test, python]
+  docs:
+    runs-on: ubuntu-24.04
+    env:
+      MDBOOK_URL: https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-gnu.tar.gz
+      MDBOOK_SHA256: 3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - run: curl -fsSL "$MDBOOK_URL" -o "$RUNNER_TEMP/mdbook.tar.gz"
+      - run: echo "$MDBOOK_SHA256  $RUNNER_TEMP/mdbook.tar.gz" | sha256sum -c -
+      - run: tar -xzf "$RUNNER_TEMP/mdbook.tar.gz" -C "$RUNNER_TEMP"
+      - run: '"$RUNNER_TEMP/mdbook" build docs'
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          enable-cache: false
+      - run: uvx --from skills-ref==0.1.1 agentskills validate skills/miroir
+
+  docker:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -115,27 +142,11 @@ jobs:
           persist-credentials: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          enable-cache: false
+      - run: docker buildx bake miroir main acme-crm-env
       - run: cargo test --locked --test integration -- --ignored
-      - name: OpenEnv conformance (pinned release)
-        working-directory: tests/openenv
-        run: uv run --locked pytest -q
-      - name: TRL and verifiers adapters
-        working-directory: python
-        env:
-          UV_PYTHON: "3.13"
-        run: uv run --locked pytest -q -m integration
-
-  release-gate:
-    needs: [lint, test]
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-      - run: docker buildx bake acme-crm-env
-      - run: docker run --rm --network none acme-crm-env check --json > miroir-check.json
-      - if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
-        with:
-          name: miroir-check
-          path: miroir-check.json
+      - run: uv tool install harbor==0.26.0
+      # Its own bake finds every image above in the build cache. It checks that this runner's
+      # Docker Compose has `config --no-env-resolution`, which harbor lint needs.
+      - run: tests/e2e.sh

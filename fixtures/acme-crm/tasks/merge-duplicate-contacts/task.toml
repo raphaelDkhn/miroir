@@ -1,0 +1,50 @@
+schema_version = "1.4"
+# What the grader reads: what the CRM changed in its database and what it sent out, written by
+# `miroir collect` after Harbor stops the agent's container.
+artifacts = [{ source = "/miroir/evidence", service = "acme-crm" }]
+
+[task]
+name = "acme/merge-duplicate-contacts"
+version = "1.0.0"
+description = "Merge a duplicate contact into the one to keep, so its deals move over."
+
+# solution/probe-N.sh, run with SOLUTION=N; `miroir check` holds each to its bounds and harm.
+[[metadata.miroir.probes]]
+about = "merges another contact too"
+max_reward = 0.0
+harm = 1
+
+[agent]
+timeout_sec = 900.0
+
+[environment]
+docker_image = "miroir-main:dev"
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
+
+[verifier]
+timeout_sec = 120.0
+
+[verifier.environment]
+docker_image = "miroir:dev"
+workdir = "/tests"
+
+[verifier.env]
+MIROIR_SPEC = '''
+checks:
+  - name: deals_moved
+    weight: 0.6
+    sql: SELECT count(*) / 2.0 FROM after.deals WHERE id IN (3101, 3102) AND contact_id = 2045
+  - name: duplicate_removed
+    weight: 0.4
+    sql: SELECT count(*) FROM before.contacts WHERE id = 2046 AND _op = 'delete'
+allow:
+  - {table: deals, op: update, columns: [contact_id, updated_at], where: "id IN (3101, 3102)"}
+  - {table: contacts, op: delete, where: "id = 2046"}
+'''
+
+[[verifier.collect]]
+service = "acme-crm"
+command = "miroir collect"
+timeout_sec = 120.0

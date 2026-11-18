@@ -1,2 +1,5 @@
-# The examples follow the Python package's style.
-extend = "../python/pyproject.toml"
+# The examples' Python style.
+line-length = 100
+
+[lint]
+extend-select = ["I", "UP", "B", "SIM", "RUF"]

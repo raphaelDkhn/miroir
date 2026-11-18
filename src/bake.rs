@@ -1,322 +1,441 @@
-//! `miroir bake`: seeds each world at image build and keeps its state as the pristine copy.
+//! `miroir bake`, the last `RUN` of a world Dockerfile: seed the world, install change capture,
+//! and record the bake.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeSet, HashSet};
+use std::fmt::Display;
+use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use jiff::Timestamp;
+use jiff::tz::TimeZone;
+use serde::{Deserialize, Serialize};
 
-use crate::db::{Db, Shift};
-use crate::env::{
-    BAKE_LIMIT, BakeInfo, DATABASE_LIMIT, Dbs, EnvError, Paths, STOP_LIMIT, calendar_days_between,
-    failed, labelled, shift_between,
-};
-use crate::manifest::{Manifest, content_hash};
-use crate::state;
-use crate::supervisor::{Supervisor, lookup_user};
+use crate::manifest::Manifest;
+use crate::paths::Paths;
+use crate::pg::{self, Ignore, Pg, Shift, Table};
+use crate::run::{STOP_LIMIT, remove_dir, shift_dates, start_datastores};
+use crate::sinks;
+use crate::supervisor::{QUIET_LIMIT, READY_LIMIT, Supervisor};
 
-/// Bake every world in turn, each from the same unbaked state, then write `bake.json`.
-pub async fn run(paths: &Paths, manifest: &Manifest) -> Result<(), EnvError> {
+/// How long one `bake` or `seed` command may run.
+const COMMAND_LIMIT: Duration = Duration::from_secs(3600);
+
+/// The columns the grader adds to every row image, which no captured column may shadow.
+const RESERVED: [&str; 2] = ["_op", "_change"];
+
+/// `/miroir/bake.json`: when the bake started, and which Miroir baked.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BakeInfo {
+    /// The bake's start, from which every boot shifts the world's dates.
+    pub baked_at: jiff::Timestamp,
+    /// The version of the `miroir` binary that baked.
+    pub miroir: String,
+}
+
+/// The shift that moves data captured at `captured` to `started`; an error when `captured` is
+/// later.
+pub fn captured_shift(
+    captured: jiff::Timestamp,
+    started: jiff::Timestamp,
+) -> Result<Shift, String> {
+    if captured > started {
+        return Err(format!(
+            "the data was captured at {captured}, after this bake began at {started}: set \
+             database.time.captured to when the dump was taken"
+        ));
+    }
+    Ok(pg::shift_between(captured, started))
+}
+
+/// Bake the world into the image.
+pub async fn bake(paths: &Paths, manifest: &Manifest) -> anyhow::Result<()> {
     let started = Timestamp::now();
-    let captured = captured_shifts(manifest, started).map_err(|e| failed("time", e))?;
-    let supervisor = Supervisor::new(manifest.env.clone()).map_err(|e| EnvError::Other(e.0))?;
-    let dbs = Db::for_apps(manifest).map_err(|e| EnvError::Other(e.0))?;
-    let several = manifest.worlds.len() > 1;
-    let unbaked = if several { Some(save_unbaked(paths, manifest).await?) } else { None };
-    let mut roots = Vec::new();
-    for (i, world) in manifest.worlds.iter().enumerate() {
-        let baked = async {
-            if let Some(dirs) = unbaked.as_ref().filter(|_| i > 0) {
-                restore_unbaked(paths, dirs).await?;
-            }
-            bake_world(&supervisor, &dbs, manifest, world, captured.get(world).copied()).await?;
-            keep_world(paths, manifest, world, unbaked.as_deref()).await
-        };
-        roots = baked.await.map_err(|e| {
-            if several { EnvError::Other(format!("world '{world}': {e}")) } else { e }
-        })?;
+    let file = paths.bake_info();
+    if file.try_exists().map_err(|e| failed(1, file.display(), e))? {
+        let refusal = "this image is already baked: run `miroir bake` once, as the last RUN of a \
+                       Dockerfile whose base is not a world image";
+        return Err(failed(1, file.display(), refusal));
     }
-    if unbaked.is_some() {
-        let dir = paths.unbaked();
-        tokio::fs::remove_dir_all(&dir)
-            .await
-            .map_err(|e| failed("state", format!("{}: {e}", dir.display())))?;
+    let captured = manifest.database.time.captured;
+    let captured = captured.map(|at| captured_shift(at, started)).transpose();
+    let captured = captured.map_err(|e| failed(5, "database.time.captured", e))?;
+    if let Some(sinks) = &manifest.sinks {
+        sinks::start(sinks, None).await.map_err(|e| failed(2, "sinks", e))?;
     }
-    finish_bake(paths, manifest, started, roots).await
+    let supervisor = Supervisor::new(manifest.env.clone(), None);
+    seed(manifest, &supervisor, captured).await?;
+    supervisor.stop(STOP_LIMIT).await.map_err(|e| failed(9, "stopping the processes", e))?;
+    one_day(started, Timestamp::now()).map_err(|e| failed(10, "the clock", e))?;
+    finish(paths, started)?;
+    tracing::info!(baked_at = %started, "baked");
+    Ok(())
 }
 
-async fn bake_world(
+/// Steps 3 to 8: the datastores, the bake commands, the move of captured data, the other
+/// processes, the seed commands, then change capture. The database handle ends with them,
+/// because Postgres stops on SIGTERM only once every session has ended.
+async fn seed(
+    manifest: &Manifest,
     supervisor: &Supervisor,
-    dbs: &Dbs,
-    manifest: &Manifest,
-    world: &str,
     captured: Option<Shift>,
-) -> Result<(), EnvError> {
-    let extra = [("MIROIR_WORLD", world)];
-    tracing::info!(world, "baking world");
-    supervisor.start(manifest.datastores()).await.map_err(|e| failed("datastores", e))?;
-    for (app, db) in dbs {
-        let answering = db.wait_answering(true, DATABASE_LIMIT).await;
-        answering.map_err(|e| failed("database", labelled(dbs, app, e)))?;
-    }
-    for command in &manifest.bake {
-        tracing::info!(world, command = %command.join(" "), "bake command");
-        supervisor
-            .run_within(command, &extra, BAKE_LIMIT)
-            .await
-            .map_err(|e| failed("bake command", e))?;
-    }
-    for (app, db) in dbs {
-        let answering = db.wait_answering(false, DATABASE_LIMIT).await;
-        answering.map_err(|e| failed("database", labelled(dbs, app, e)))?;
-    }
+) -> anyhow::Result<()> {
+    let pg = Pg::new(&manifest.database);
+    start_datastores(supervisor, manifest, &pg).await.map_err(|e| failed(3, "datastores", e))?;
+    run_commands(supervisor, 4, "bake", &manifest.bake).await?;
     if let Some(shift) = captured {
-        tracing::info!(world, days = shift.timestamps, "moving the captured data to the anchor");
-        for (app, db) in dbs {
-            let moved = db.shift(shift).await;
-            moved.map_err(|e| failed("captured world", labelled(dbs, app, e)))?;
-        }
+        shift_dates(&pg, shift).await.map_err(|e| failed(5, "moving the captured data", e))?;
     }
-    supervisor.start(manifest.app_processes()).await.map_err(|e| failed("processes", e))?;
-    supervisor.wait_quiet(manifest.quiet.as_ref()).await.map_err(|e| failed("quiet", e))?;
-    if !manifest.seed.is_empty() {
-        for command in &manifest.seed {
-            tracing::info!(world, command = %command.join(" "), "seed command");
-            supervisor
-                .run_within(command, &extra, BAKE_LIMIT)
-                .await
-                .map_err(|e| failed("seed command", e))?;
-        }
-        supervisor.wait_quiet(manifest.quiet.as_ref()).await.map_err(|e| failed("quiet", e))?;
-    }
-    if let Some(crash) = supervisor.crash() {
-        return Err(failed("processes", crash));
-    }
-    for (app, db) in dbs {
-        let capture_failed = |e| failed("change capture", labelled(dbs, app, e));
-        for warning in db.install_capture().await.map_err(capture_failed)? {
-            tracing::warn!(world, app = app.as_str(), "{warning}");
-        }
-        db.clear_log().await.map_err(capture_failed)?;
-    }
-    supervisor.stop(STOP_LIMIT).await.map_err(|e| failed("stop", e))
+    supervisor.start(&manifest.apps(), READY_LIMIT).await.map_err(|e| failed(6, "processes", e))?;
+    let quiet = manifest.quiet.as_deref();
+    supervisor.wait_quiet(quiet, QUIET_LIMIT).await.map_err(|e| failed(6, "quiet", e))?;
+    running(supervisor, 6)?;
+    run_commands(supervisor, 7, "seed", &manifest.seed).await?;
+    supervisor.wait_quiet(quiet, QUIET_LIMIT).await.map_err(|e| failed(7, "quiet", e))?;
+    running(supervisor, 7)?;
+    capture(&pg).await
 }
 
-async fn save_unbaked(paths: &Paths, manifest: &Manifest) -> Result<Vec<PathBuf>, EnvError> {
-    let dirs = state_roots(manifest).await?;
-    let (saved, target) = (dirs.clone(), paths.unbaked());
-    tokio::task::spawn_blocking(move || state::save(&saved, &target))
-        .await
-        .map_err(|e| failed("state", e))?
-        .map_err(|e| failed("state", format!("cannot save it before the first world: {e}")))?;
-    Ok(dirs)
-}
-
-async fn restore_unbaked(paths: &Paths, dirs: &[PathBuf]) -> Result<(), EnvError> {
-    let (dirs, source) = (dirs.to_vec(), paths.unbaked());
-    tokio::task::spawn_blocking(move || {
-        for dir in state::TEMP_DIRS {
-            state::empty(Path::new(dir))?;
-        }
-        state::restore(&dirs, &source, &mut state::Stamps::new())
-    })
-    .await
-    .map_err(|e| failed("state", e))?
-    .map_err(|e| failed("state", e))
-}
-
-async fn keep_world(
-    paths: &Paths,
-    manifest: &Manifest,
-    world: &str,
-    before: Option<&[PathBuf]>,
-) -> Result<Vec<PathBuf>, EnvError> {
-    let roots = state_roots(manifest).await?;
-    if let Some(before) = before {
-        same_state(world, before, &roots).map_err(|e| failed("state", e))?;
-    }
-    let (moved, pristine) = (roots.clone(), paths.pristine().join(world));
-    tokio::task::spawn_blocking(move || state::bake_move(&moved, &pristine))
-        .await
-        .map_err(|e| failed("state", e))?
-        .map_err(|e| failed("state", e))?;
-    Ok(roots)
-}
-
-fn same_state(world: &str, before: &[PathBuf], after: &[PathBuf]) -> Result<(), String> {
-    let missing = |from: &[PathBuf], to: &[PathBuf]| -> Vec<String> {
-        from.iter().filter(|path| !to.contains(path)).map(|p| p.display().to_string()).collect()
-    };
-    let (added, gone) = (missing(after, before), missing(before, after));
-    if added.is_empty() && gone.is_empty() {
-        return Ok(());
-    }
-    let shown = |paths: &[String]| if paths.is_empty() { "none".into() } else { paths.join(", ") };
-    Err(format!(
-        "baking world '{world}' changed what the processes can write (new: {}; gone: {}), so \
-         the next world would bake on its files: create those paths in the image before bake, or \
-         list state",
-        shown(&added),
-        shown(&gone)
-    ))
-}
-
-fn one_day(started: Timestamp, ended: Timestamp) -> Result<(), String> {
-    if calendar_days_between(started, ended) == 0 {
-        return Ok(());
-    }
-    Err(format!(
-        "the bake ran past midnight UTC, from {started} to {ended}, so data seeded before midnight \
-         would read a day older than it was written: bake the image again"
-    ))
-}
-
-async fn finish_bake(
-    paths: &Paths,
-    manifest: &Manifest,
-    started: Timestamp,
-    roots: Vec<PathBuf>,
-) -> Result<(), EnvError> {
-    let baked_at = Timestamp::now();
-    if manifest.anchor().is_none() {
-        one_day(started, baked_at).map_err(|e| failed("time", e))?;
-    }
-    let text = tokio::fs::read(paths.manifest()).await.map_err(|e| failed("manifest", e))?;
-    let info = BakeInfo {
-        baked_at,
-        miroir_version: env!("CARGO_PKG_VERSION").into(),
-        manifest_hash: content_hash(&text),
-        state: roots,
-    };
-    let json = serde_json::to_vec_pretty(&info).map_err(|e| failed("bake.json", e))?;
-    tokio::fs::write(paths.bake_info(), json).await.map_err(|e| failed("bake.json", e))?;
-    for (path, mode) in
-        [(paths.pristine(), 0o700), (paths.tasks(), 0o700), (paths.manifest(), 0o600)]
-    {
-        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+/// Run each command of a step in turn, within the command limit.
+async fn run_commands(
+    supervisor: &Supervisor,
+    step: u8,
+    kind: &str,
+    commands: &[Vec<String>],
+) -> anyhow::Result<()> {
+    for command in commands {
+        let shown = command.join(" ");
+        tracing::info!(command = %shown, "{kind} command");
+        supervisor
+            .run_within(command, COMMAND_LIMIT)
             .await
-            .map_err(|e| failed("permissions", e))?;
+            .map_err(|e| failed(step, format_args!("{kind} command `{shown}`"), e))?;
     }
     Ok(())
 }
 
-async fn state_roots(manifest: &Manifest) -> Result<Vec<PathBuf>, EnvError> {
-    match &manifest.state {
-        Some(dirs) => Ok(dirs.clone()),
-        None => derive_state(manifest).await,
-    }
+/// Fail when a process exited since it started.
+fn running(supervisor: &Supervisor, step: u8) -> anyhow::Result<()> {
+    let Some(crash) = supervisor.crash() else { return Ok(()) };
+    let error = format!("it exited during the bake ({}): check its output above", crash.status);
+    Err(failed(step, format_args!("process '{}'", crash.process), error))
 }
 
-async fn derive_state(manifest: &Manifest) -> Result<Vec<PathBuf>, EnvError> {
-    let mut users = Vec::new();
-    for process in &manifest.processes {
-        let name = process.user.as_deref().unwrap_or("root");
-        let (uid, gid) = lookup_user(name).await.map_err(|e| failed("state", e))?;
-        if uid == 0 {
-            let message =
-                format!("process '{}' runs as uid 0: give it a user, or list state", process.name);
-            return Err(failed("state", message));
-        }
-        users.push((uid, gid));
-    }
-    users.sort_unstable();
-    users.dedup();
-    let skip: Vec<PathBuf> =
-        state::UNWALKED.iter().chain(&state::TEMP_DIRS).map(PathBuf::from).collect();
-    let walked = skip.clone();
-    let roots =
-        tokio::task::spawn_blocking(move || state::writable_roots(Path::new("/"), &users, &walked))
-            .await
-            .map_err(|e| failed("state", e))?
-            .map_err(|e| failed("state", e))?;
-    if roots.is_empty() {
-        return Err(failed("state", "no process can write anything to restore: list state"));
-    }
-    for root in &roots {
-        if let Some(inside) = skip.iter().find(|s| s.starts_with(root)) {
-            let message = format!(
-                "a process can write {}, which holds {}: make it read-only, or list state",
-                root.display(),
-                inside.display()
-            );
-            return Err(failed("state", message));
-        }
-        tracing::info!(path = %root.display(), "state, as a process can write it");
-    }
-    Ok(roots)
+/// Step 8: capture the changes of every table not ignored, from an empty change log.
+async fn capture(pg: &Pg) -> anyhow::Result<()> {
+    let tables = pg.catalog().await.map_err(|e| failed(8, "the catalog", e))?;
+    let ignore = pg.ignore(&tables).map_err(|e| failed(8, "database.ignore", e))?;
+    sqlite_names(&tables, &ignore).map_err(|e| failed(8, "captured names", e))?;
+    pg.install_capture(&tables, &ignore).await.map_err(|e| {
+        failed(8, "change capture", format_args!("{e}: database.url must connect as a superuser"))
+    })?;
+    pg.clear_log().await.map_err(|e| failed(8, "miroir.log", e))
 }
 
-fn captured_shifts(
-    manifest: &Manifest,
-    started: Timestamp,
-) -> Result<BTreeMap<String, Shift>, String> {
-    let to = manifest.anchor().unwrap_or(started);
-    let mut shifts = BTreeMap::new();
-    for (world, &at) in &manifest.time.captured {
-        if at > started {
-            return Err(format!(
-                "time.captured has world '{world}' captured at {at}, after this bake began at \
-                 {started}: a snapshot can't come from the future"
-            ));
+/// Refuse captured names the grader's SQLite copy of the tables cannot hold.
+fn sqlite_names(tables: &[Table], ignore: &Ignore) -> Result<(), String> {
+    let (mut clashes, mut names) = (Vec::new(), HashSet::new());
+    for table in tables {
+        let name = table.evidence_name();
+        if ignore.tables.contains(&name) {
+            continue;
         }
-        shifts.insert(world.clone(), shift_between(at, to));
+        let folded = name.to_ascii_lowercase();
+        if folded.starts_with("sqlite_") || !names.insert(folded) {
+            clashes.push(name.clone());
+        }
+        clashes.extend(column_clashes(table, &name, ignore.columns.get(&name)));
     }
-    Ok(shifts)
+    if clashes.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{}: the grader copies captured tables into SQLite, which ignores ASCII case in names and \
+         reserves table names starting sqlite_, and adds the columns _op and _change to every \
+         row image: rename each, or add it to database.ignore",
+        clashes.join(", ")
+    ))
+}
+
+/// The captured columns of `table` equal, ignoring ASCII case, to an earlier one or to a
+/// column the grader adds.
+fn column_clashes(table: &Table, name: &str, ignored: Option<&BTreeSet<String>>) -> Vec<String> {
+    let mut seen: HashSet<String> = RESERVED.map(String::from).into();
+    let mut clashes = Vec::new();
+    for column in &table.columns {
+        let captured = !ignored.is_some_and(|ignored| ignored.contains(&column.name));
+        if captured && !seen.insert(column.name.to_ascii_lowercase()) {
+            clashes.push(format!("{name}.{}", column.name));
+        }
+    }
+    clashes
+}
+
+/// Step 10: refuse a bake that ran past midnight UTC, because each boot moves dates by calendar
+/// days from the bake's start, so rows written after midnight would read a day ahead.
+fn one_day(started: Timestamp, ended: Timestamp) -> Result<(), String> {
+    let day = |at: Timestamp| at.to_zoned(TimeZone::UTC).date();
+    if day(started) == day(ended) {
+        return Ok(());
+    }
+    Err(format!(
+        "the bake ran past midnight UTC, from {started} to {ended}, so rows written after \
+         midnight would read a day ahead of the rest: build the image again"
+    ))
+}
+
+/// Step 11: record the bake, leave an empty evidence directory and no runtime state, and keep
+/// the Miroir root from the product's users.
+fn finish(paths: &Paths, started: Timestamp) -> anyhow::Result<()> {
+    let info = BakeInfo { baked_at: started, miroir: env!("CARGO_PKG_VERSION").into() };
+    let file = paths.bake_info();
+    std::fs::write(&file, serde_json::to_vec_pretty(&info)?)
+        .map_err(|e| failed(11, file.display(), e))?;
+    let evidence = paths.evidence_dir();
+    std::fs::create_dir_all(&evidence).map_err(|e| failed(11, evidence.display(), e))?;
+    let run_dir = paths.run_dir();
+    remove_dir(&run_dir).map_err(|e| failed(11, run_dir.display(), e))?;
+    let Some(root) = file.parent() else {
+        return Err(failed(11, file.display(), "the Miroir root has no directory to make private"));
+    };
+    std::fs::set_permissions(root, Permissions::from_mode(0o700))
+        .map_err(|e| failed(11, root.display(), e))
+}
+
+/// A failed bake step: its number, the command, process or setting it was at, and the error,
+/// which says what to change.
+fn failed(step: u8, at: impl Display, error: impl Display) -> anyhow::Error {
+    anyhow::anyhow!("bake step {step}, {at}: {error}")
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[test]
-    fn a_captured_world_moves_to_the_anchor_keeping_each_time_of_day() {
-        let at = |s: &str| -> Timestamp { s.parse().unwrap() };
-        let manifest = |time: &str| -> Manifest {
-            let yaml = format!(
-                "miroir: 1\nname: t\ndescription: t\nprocesses: []\npersonas: {{}}\napps: {{}}\n\
-                 worlds: [week1, week2]\ntime: {time}\n"
-            );
-            serde_saphyr::from_str(&yaml).unwrap()
+    use super::*;
+    use crate::manifest::{Database, DbTime, Sinks};
+    use crate::pg::{Column, ColumnKind};
+
+    /// A directory under the temp directory, removed with what it holds when dropped.
+    pub(crate) struct TempRoot(PathBuf);
+
+    impl std::ops::Deref for TempRoot {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Numbers the temp roots of this process: tests run in parallel, and the clock alone can
+    /// give two of them one name.
+    static ROOTS: AtomicUsize = AtomicUsize::new(0);
+
+    /// A new, empty directory under the temp directory.
+    pub(crate) fn temp_root(name: &str) -> TempRoot {
+        let nanos =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let n = ROOTS.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir()
+            .join(format!("miroir-world-{name}-{}-{n}-{nanos}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        TempRoot(dir)
+    }
+
+    /// A manifest with no process, sink or command.
+    pub(crate) fn manifest() -> Manifest {
+        Manifest {
+            expose: vec![3000],
+            processes: Vec::new(),
+            env: BTreeMap::new(),
+            bake: Vec::new(),
+            seed: Vec::new(),
+            database: Database {
+                url: "postgres://postgres@127.0.0.1:5432/crm".into(),
+                ignore: Vec::new(),
+                time: DbTime { exclude: Vec::new(), epoch: BTreeMap::new(), captured: None },
+            },
+            sinks: None,
+            quiet: None,
+        }
+    }
+
+    fn at(text: &str) -> Timestamp {
+        text.parse().unwrap()
+    }
+
+    fn table(name: &str, columns: &[&str]) -> Table {
+        let column = |name: &&str| Column {
+            name: (*name).into(),
+            kind: ColumnKind::Other,
+            generated: false,
+            pk: false,
+            sql_type: "text".into(),
         };
-        let bake = manifest("{captured: {week1: 2026-10-26T06:00:00Z}}");
-        let afternoon = captured_shifts(&bake, at("2026-11-09T14:00:00Z")).unwrap();
-        assert_eq!(afternoon["week1"], Shift { timestamps: 14, dates: 14 });
-        let early = captured_shifts(&bake, at("2026-11-09T05:00:00Z")).unwrap();
-        assert_eq!(
-            early["week1"],
-            Shift { timestamps: 13, dates: 14 },
-            "a day apart, as a reset at an earlier time of day than the anchor's moves them"
-        );
-        assert!(!early.contains_key("week2"), "a world without a capture stays");
-        let fixed = "{anchor: \"2026-10-01T00:00:00Z\", captured: {week1: 2026-10-26T06:00:00Z}}";
-        let back = captured_shifts(&manifest(fixed), at("2026-11-09T14:00:00Z")).unwrap();
-        assert_eq!(
-            back["week1"],
-            Shift { timestamps: -26, dates: -25 },
-            "back to an earlier fixed anchor, and no newer than it"
-        );
-        let future = captured_shifts(&bake, at("2026-10-26T05:59:59Z")).unwrap_err();
-        assert!(future.contains("can't come from the future"), "{future}");
+        Table {
+            name: name.into(),
+            schema: "public".into(),
+            qualified: format!("public.{name}"),
+            columns: columns.iter().map(column).collect(),
+            partitioned: false,
+            id: 1,
+            captured: false,
+        }
     }
 
     #[test]
-    fn a_world_must_leave_the_processes_the_same_state_to_write() {
-        let paths = |list: &[&str]| list.iter().map(PathBuf::from).collect::<Vec<_>>();
-        let before = paths(&["/etc/app.ini", "/var/lib/db"]);
-        assert_eq!(same_state("north", &before, &before), Ok(()));
-        let err = same_state("south", &before, &paths(&["/srv/extra", "/var/lib/db"])).unwrap_err();
-        assert!(err.contains("baking world 'south' changed"), "{err}");
-        assert!(err.contains("(new: /srv/extra; gone: /etc/app.ini)"), "{err}");
-        let grown =
-            same_state("south", &before, &paths(&["/etc/app.ini", "/srv/x", "/var/lib/db"]));
-        assert!(grown.unwrap_err().contains("(new: /srv/x; gone: none)"));
+    fn captured_data_moves_from_its_capture_to_the_bake_start() {
+        let captured = at("2026-10-26T06:00:00Z");
+        for started in ["2026-11-09T14:00:00Z", "2026-11-09T05:00:00Z", "2026-10-26T06:00:00Z"] {
+            let started = at(started);
+            assert_eq!(
+                captured_shift(captured, started),
+                Ok(pg::shift_between(captured, started)),
+                "the bake's own shift arithmetic, from {captured} to {started}"
+            );
+        }
+    }
+
+    #[test]
+    fn data_captured_after_the_bake_began_is_refused() {
+        let error = captured_shift(at("2026-11-09T14:00:01Z"), at("2026-11-09T14:00:00Z"));
+        let error = error.unwrap_err();
+        assert!(error.contains("captured at 2026-11-09T14:00:01Z"), "{error}");
+        assert!(error.contains("after this bake began at 2026-11-09T14:00:00Z"), "{error}");
+        assert!(error.ends_with("set database.time.captured to when the dump was taken"));
     }
 
     #[test]
     fn a_bake_that_runs_past_midnight_utc_is_refused() {
-        let at = |s: &str| s.parse::<Timestamp>().unwrap();
-        assert_eq!(one_day(at("2026-11-05T00:00:00Z"), at("2026-11-05T23:59:59Z")), Ok(()));
-        let err = one_day(at("2026-11-05T23:55:00Z"), at("2026-11-06T00:05:00Z")).unwrap_err();
-        assert!(err.contains("ran past midnight UTC") && err.contains("bake the image again"));
+        assert_eq!(one_day(at("2026-11-05T00:00:00Z"), at("2026-11-05T23:59:59.999Z")), Ok(()));
+        let error = one_day(at("2026-11-05T23:59:59Z"), at("2026-11-06T00:00:00Z")).unwrap_err();
+        assert!(error.contains("ran past midnight UTC"), "{error}");
+        assert!(error.ends_with("build the image again"), "{error}");
+        let local = one_day(at("2026-11-05T23:30:00+02:00"), at("2026-11-06T00:30:00+02:00"));
+        assert_eq!(local, Ok(()), "past local midnight, still 5 November in UTC");
+    }
+
+    #[test]
+    fn captured_columns_sqlite_cannot_tell_apart_are_refused() {
+        let notes = table("notes", &["id", "_op", "text", "_change"]);
+        let error = sqlite_names(std::slice::from_ref(&notes), &Ignore::default());
+        let error = error.unwrap_err();
+        let name = notes.evidence_name();
+        assert!(error.starts_with(&format!("{name}._op, {name}._change: ")), "{error}");
+        assert!(error.ends_with("rename each, or add it to database.ignore"), "{error}");
+        let cased = table("notes", &["Id", "id", "_OP", "_Change"]);
+        let error = sqlite_names(&[cased], &Ignore::default()).unwrap_err();
+        assert!(error.starts_with("notes.id, notes._OP, notes._Change: "), "{error}");
+        let plain = table("deals", &["id", "op", "change"]);
+        assert_eq!(sqlite_names(&[plain], &Ignore::default()), Ok(()));
+    }
+
+    #[test]
+    fn tables_sqlite_cannot_tell_apart_or_reserves_are_refused() {
+        let mut audit = table("sqlite_stat1", &["id"]);
+        audit.schema = "audit".into();
+        let tables =
+            [table("User", &["id"]), table("user", &["id"]), table("SQLite_stat1", &["id"]), audit];
+        let error = sqlite_names(&tables, &Ignore::default()).unwrap_err();
+        assert!(error.starts_with("user, SQLite_stat1: "), "{error}");
+        let mut ignore = Ignore::default();
+        ignore.tables.extend(["user".to_string(), "SQLite_stat1".to_string()]);
+        assert_eq!(sqlite_names(&tables, &ignore), Ok(()), "audit.sqlite_stat1 is allowed");
+    }
+
+    #[test]
+    fn an_ignored_table_or_column_may_be_named_op_or_change() {
+        let notes = table("notes", &["id", "_op", "_change"]);
+        let name = notes.evidence_name();
+        let mut ignore = Ignore::default();
+        ignore.tables.insert(name.clone());
+        assert_eq!(sqlite_names(std::slice::from_ref(&notes), &ignore), Ok(()));
+        let mut ignore = Ignore::default();
+        ignore.columns.insert(name.clone(), BTreeSet::from(["_op".to_string()]));
+        let error = sqlite_names(&[notes], &ignore).unwrap_err();
+        assert!(error.starts_with(&format!("{name}._change: ")), "only _change is captured");
+    }
+
+    #[tokio::test]
+    async fn a_failed_command_names_its_step_and_its_argv() {
+        let supervisor = Supervisor::new(BTreeMap::new(), None);
+        let commands = [vec!["false".to_string()], vec!["true".to_string()]];
+        let error = run_commands(&supervisor, 4, "bake", &commands).await.unwrap_err();
+        let error = error.to_string();
+        assert!(error.starts_with("bake step 4, bake command `false`: "), "{error}");
+        assert!(run_commands(&supervisor, 7, "seed", &[]).await.is_ok(), "no seed command");
+    }
+
+    #[tokio::test]
+    async fn an_image_baked_once_is_not_baked_again() {
+        let root = temp_root("baked");
+        let paths = Paths::new(&*root);
+        std::fs::write(paths.bake_info(), "{}").unwrap();
+        let error = bake(&paths, &manifest()).await.unwrap_err().to_string();
+        let file = paths.bake_info().display().to_string();
+        assert!(error.starts_with(&format!("bake step 1, {file}: ")), "{error}");
+        assert!(error.contains("this image is already baked"), "{error}");
+        assert_eq!(std::fs::read_to_string(paths.bake_info()).unwrap(), "{}");
+        assert!(!paths.evidence_dir().exists(), "nothing ran");
+    }
+
+    #[tokio::test]
+    async fn a_sink_port_in_use_fails_with_the_sinks_own_fix() {
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = taken.local_addr().unwrap().port();
+        let root = temp_root("taken");
+        let mut manifest = manifest();
+        manifest.sinks = Some(Sinks { smtp: Some(port), http: None, responses: BTreeMap::new() });
+        let error = bake(&Paths::new(&*root), &manifest).await.unwrap_err().to_string();
+        let sink = format!("bake step 2, sinks: the SMTP sink cannot listen on 127.0.0.1:{port}: ");
+        assert!(error.starts_with(&sink), "{error}");
+        let fix = "; free the port, or give the sink another one in the manifest's sinks";
+        assert!(error.ends_with(fix), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_capture_after_the_bake_began_fails_before_anything_starts() {
+        let root = temp_root("future");
+        let paths = Paths::new(&*root);
+        let mut manifest = manifest();
+        manifest.database.time.captured = Some(at("2999-01-01T00:00:00Z"));
+        let error = bake(&paths, &manifest).await.unwrap_err().to_string();
+        assert!(error.starts_with("bake step 5, database.time.captured: "), "{error}");
+        assert!(!paths.bake_info().exists() && !paths.evidence_dir().exists());
+    }
+
+    #[test]
+    fn finishing_records_the_bake_and_makes_the_root_private() {
+        let root = temp_root("finish");
+        let paths = Paths::new(&*root);
+        std::fs::create_dir_all(paths.run_dir().join("nested")).unwrap();
+        std::fs::write(paths.ready(), "").unwrap();
+        let started = at("2026-11-17T10:00:00Z");
+        finish(&paths, started).unwrap();
+        let info: BakeInfo =
+            serde_json::from_slice(&std::fs::read(paths.bake_info()).unwrap()).unwrap();
+        assert_eq!((info.baked_at, info.miroir.as_str()), (started, env!("CARGO_PKG_VERSION")));
+        assert_eq!(std::fs::read_dir(paths.evidence_dir()).unwrap().count(), 0);
+        assert!(!paths.run_dir().exists(), "no runtime state in the image");
+        let mode = std::fs::metadata(&*root).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        finish(&paths, started).unwrap();
+    }
+
+    #[test]
+    fn a_failed_finish_names_the_step_and_the_file() {
+        let root = temp_root("gone");
+        let paths = Paths::new(root.join("missing"));
+        let error = finish(&paths, at("2026-11-17T10:00:00Z")).unwrap_err().to_string();
+        let file = paths.bake_info().display().to_string();
+        assert!(error.starts_with(&format!("bake step 11, {file}: ")), "{error}");
     }
 }

@@ -1,559 +1,394 @@
-use std::path::Path;
+//! What the integration tests drive: worlds booted from the fixture's world image, the agent's
+//! container running a task's solution against one, the grader image, and the evidence a world
+//! leaves. Every container and network carries the label `miroir-test` and is removed when its
+//! handle drops. The images come from `docker buildx bake`; these tests never build them.
+
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
-pub const ENV_IMAGE: &str = "acme-crm-env";
-pub const MYSQL_ENV_IMAGE: &str = "mini-shop-env";
-pub const APPS_IMAGE: &str = "acme-apps-env";
-pub const SANDBOX_IMAGE: &str = "miroir-sandbox";
+use serde_json::Value;
 
-pub fn docker(args: &[&str]) -> Output {
+/// The fixture's world image.
+pub const WORLD: &str = "acme-crm-env:dev";
+/// The grader: Harbor's separate verifier runs its `/tests/test.sh`.
+const GRADER: &str = "miroir:dev";
+/// The agent's container, where Harbor's oracle runs a task's solution.
+const MAIN: &str = "miroir-main:dev";
+const LABEL: &str = "miroir-test";
+/// Worlds alive at once: each runs Postgres, Redis and two Node processes.
+const MAX_WORLDS: usize = 4;
+/// Harbor's healthcheck waits 300 s for the ready marker; a test world gets less.
+const BOOT_LIMIT: Duration = Duration::from_secs(120);
+
+/// Run the Docker CLI.
+fn docker(args: &[&str]) -> Output {
     Command::new("docker").args(args).output().expect("the docker CLI runs")
 }
 
+/// Run the Docker CLI, which must succeed; its trimmed stdout.
 pub fn docker_ok(args: &[&str]) -> String {
     let out = docker(args);
-    assert!(
-        out.status.success(),
-        "docker {} failed: {}",
-        args.join(" "),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "docker {} failed:\n{}", args.join(" "), text(&out));
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-const PID_LABEL: &str = "miroir-test-pid";
-
-pub fn pid_label() -> String {
-    format!("{PID_LABEL}={}", std::process::id())
+/// stdout, then stderr.
+fn text(out: &Output) -> String {
+    format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
 }
 
-fn remove_orphans() {
-    let filter = format!("label={PID_LABEL}");
-    let format = "{{.ID}} {{.Label \"miroir-test-pid\"}}";
-    for kind in [["ps", "-a"], ["network", "ls"]] {
-        let listed = docker_ok(&[kind[0], kind[1], "--filter", &filter, "--format", format]);
-        for line in listed.lines() {
-            let Some((id, pid)) = line.split_once(' ') else { continue };
-            let pid = pid.parse().ok().and_then(rustix::process::Pid::from_raw);
-            let gone = pid.is_some_and(|pid| {
-                rustix::process::test_kill_process(pid) == Err(rustix::io::Errno::SRCH)
-            });
-            if gone && kind[0] == "ps" {
-                let _ = docker(&["rm", "-f", id]);
-            } else if gone {
-                let _ = docker(&["network", "rm", id]);
-            }
+/// Fail once, with the fix, when `docker buildx bake` has not built the images.
+fn images() {
+    static CHECKED: OnceLock<()> = OnceLock::new();
+    CHECKED.get_or_init(|| {
+        for image in [WORLD, GRADER, MAIN] {
+            let found = docker(&["image", "inspect", "--format", "{{.Id}}", image]);
+            assert!(found.status.success(), "no image {image}: run `docker buildx bake` first");
         }
-    }
-}
-
-pub fn build_images() {
-    static BUILT: OnceLock<()> = OnceLock::new();
-    BUILT.get_or_init(|| {
-        remove_orphans();
-        bake(&[]);
     });
 }
 
-pub fn bake(args: &[&str]) -> String {
-    let (built, text) = bake_outcome(args);
-    assert!(built, "docker buildx bake {} failed:\n{text}", args.join(" "));
-    text
+/// A path of the fixture, `fixtures/acme-crm/<path>`.
+fn fixture(path: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/acme-crm").join(path)
 }
 
-pub fn bake_outcome(args: &[&str]) -> (bool, String) {
-    let out = Command::new("docker")
-        .args(["buildx", "bake", "--progress=plain"])
-        .arg(format!("--allow=fs.read={}", std::env::temp_dir().display()))
-        .args(args)
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .expect("the docker CLI runs");
-    let text =
-        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    (out.status.success(), text)
+/// The fixture's manifest, with `from`, which it holds once, replaced by `to`.
+pub fn manifest_with(from: &str, to: &str) -> String {
+    let manifest = std::fs::read_to_string(fixture("miroir.yaml")).unwrap();
+    assert_eq!(manifest.matches(from).count(), 1, "the fixture's miroir.yaml has one {from:?}");
+    manifest.replacen(from, to, 1)
 }
 
-const MAX_CONTAINERS: usize = 4;
-static SLOTS: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+/// The `MIROIR_SPEC` of a fixture task.
+pub fn spec(task: &str) -> String {
+    let toml = std::fs::read_to_string(fixture(&format!("tasks/{task}/task.toml"))).unwrap();
+    let task: toml::Table = toml::from_str(&toml).unwrap();
+    task["verifier"]["env"]["MIROIR_SPEC"].as_str().unwrap().to_string()
+}
 
+/// A new directory under the temp directory, removed when dropped.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Scratch {
+        static MADE: AtomicUsize = AtomicUsize::new(0);
+        let made = MADE.fetch_add(1, Ordering::SeqCst);
+        let dir = format!("{LABEL}-{}-{made}-{name}", std::process::id());
+        let dir = std::env::temp_dir().join(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+
+    /// `path` under the directory, with its parent directories made.
+    fn file(&self, path: &str) -> PathBuf {
+        let file = self.0.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        file
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A container, removed when dropped.
+struct Container(String);
+
+impl Container {
+    /// `docker create` with `args`: options, the image, then its command.
+    fn create(args: &[&str]) -> Container {
+        Container(docker_ok(&[&["create", "--label", LABEL], args].concat()))
+    }
+
+    /// Copy the contents of the directory `from` to `/`.
+    fn copy_in(&self, from: &Path) {
+        docker_ok(&["cp", &format!("{}/.", from.display()), &format!("{}:/", self.0)]);
+    }
+
+    /// Start it and wait for its end: its exit status, stdout and stderr.
+    fn run(&self) -> (i32, String, String) {
+        let out = docker(&["start", "--attach", &self.0]);
+        let (stdout, stderr) = (&out.stdout, &out.stderr);
+        let (stdout, stderr) = (String::from_utf8_lossy(stdout), String::from_utf8_lossy(stderr));
+        (out.status.code().unwrap(), stdout.into_owned(), stderr.into_owned())
+    }
+
+    /// Copy `path` out to `to`; false when there is no such path.
+    fn copy_out(&self, path: &str, to: &Path) -> bool {
+        docker(&["cp", &format!("{}:{path}", self.0), &to.display().to_string()]).status.success()
+    }
+}
+
+impl Drop for Container {
+    fn drop(&mut self) {
+        let _ = docker(&["rm", "--force", "--volumes", &self.0]);
+    }
+}
+
+/// A Docker network, removed when dropped.
+struct Network(String);
+
+impl Drop for Network {
+    fn drop(&mut self) {
+        let _ = docker(&["network", "rm", &self.0]);
+    }
+}
+
+/// One of `MAX_WORLDS` places for a live world.
 struct Permit;
 
+static PLACES: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+
 impl Permit {
-    fn acquire() -> Permit {
-        let (count, freed) = &SLOTS;
-        let mut count = count.lock().unwrap();
-        while *count >= MAX_CONTAINERS {
-            count = freed.wait(count).unwrap();
+    fn take() -> Permit {
+        let (taken, freed) = &PLACES;
+        let mut taken = taken.lock().unwrap_or_else(PoisonError::into_inner);
+        while *taken >= MAX_WORLDS {
+            taken = freed.wait(taken).unwrap_or_else(PoisonError::into_inner);
         }
-        *count += 1;
+        *taken += 1;
         Permit
     }
 }
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        let (count, freed) = &SLOTS;
-        *count.lock().unwrap() -= 1;
+        let (taken, freed) = &PLACES;
+        *taken.lock().unwrap_or_else(PoisonError::into_inner) -= 1;
         freed.notify_one();
     }
 }
 
-pub struct Container {
-    pub id: String,
-    pub port: u16,
-    pub sandbox: Option<Sandbox>,
-    _permit: Option<Permit>,
+/// A container of the world image.
+pub struct World {
+    // Fields drop in order: the network goes once the container is gone.
+    container: Container,
+    network: Option<Network>,
+    _permit: Permit,
 }
 
-#[derive(Default)]
-pub struct Options<'a> {
-    pub image: &'a str,
-    pub docker_args: &'a [&'a str],
-    pub command: &'a [&'a str],
-    pub files: &'a [(&'a str, &'a str)],
-    pub sandbox: bool,
-}
-
-pub struct Sandbox {
-    pub id: String,
-    pub network: String,
-    pub port: u16,
-}
-
-impl Sandbox {
-    pub fn start() -> Sandbox {
-        static STARTED: AtomicUsize = AtomicUsize::new(0);
-        build_images();
-        let label = pid_label();
-        let count = STARTED.fetch_add(1, Ordering::SeqCst);
-        let network = format!("miroir-test-{}-{count}", std::process::id());
-        docker_ok(&["network", "create", "--label", &label, &network]);
-        let id = docker_ok(&[
-            "run",
-            "-d",
-            "--label",
-            &label,
-            "--network",
-            &network,
-            "--network-alias",
-            "sandbox",
-            "-p",
-            "127.0.0.1::8000",
-            SANDBOX_IMAGE,
-        ]);
-        let port = published_port(&id);
-        Sandbox { id, network, port }
-    }
-
-    pub fn url(&self, path: &str) -> String {
-        format!("http://127.0.0.1:{}{path}", self.port)
-    }
-}
-
-impl Drop for Sandbox {
-    fn drop(&mut self) {
-        let _ = docker(&["rm", "-f", &self.id]);
-        let _ = docker(&["network", "rm", &self.network]);
-    }
-}
-
-impl Container {
-    pub fn start(options: &Options) -> Container {
-        Container::start_with(options, true)
-    }
-
-    pub fn start_with(options: &Options, capped: bool) -> Container {
-        build_images();
-        let permit = capped.then(Permit::acquire);
-        let label = pid_label();
-        let sandbox = options.sandbox.then(Sandbox::start);
-        let mut args = vec!["create", "--label", &label, "-p", "127.0.0.1::8000"];
-        if let Some(sandbox) = &sandbox {
-            args.extend([
-                "--network",
-                &sandbox.network,
-                "-e",
-                "MIROIR_SANDBOX=http://sandbox:8000",
-            ]);
-        }
-        args.extend_from_slice(options.docker_args);
-        args.push(if options.image.is_empty() { ENV_IMAGE } else { options.image });
-        args.extend_from_slice(options.command);
-        let id = docker_ok(&args);
-        let scratch = std::env::temp_dir().join(format!("miroir-test-{id}"));
-        for (target, contents) in options.files {
-            let source = scratch.join(target.trim_start_matches('/'));
-            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+impl World {
+    /// A world with `files` (absolute path, contents) written over the image's, created with
+    /// `options` before the image name; not yet started. Each file is copied alone, so the
+    /// directories above it keep their owner and mode.
+    pub fn create(files: &[(&str, &str)], options: &[&str]) -> World {
+        images();
+        let permit = Permit::take();
+        let container = Container::create(&[options, &[WORLD]].concat());
+        let scratch = Scratch::new("world");
+        for (n, (path, contents)) in files.iter().enumerate() {
+            let source = scratch.file(&n.to_string());
             std::fs::write(&source, contents).unwrap();
-            let parent = Path::new(target).parent().unwrap().to_str().unwrap();
-            docker_ok(&["cp", source.to_str().unwrap(), &format!("{id}:{parent}/")]);
+            let to = format!("{}:{path}", container.0);
+            docker_ok(&["cp", &source.display().to_string(), &to]);
         }
-        let _ = std::fs::remove_dir_all(&scratch);
-        docker_ok(&["start", &id]);
-        let container = Container { port: published_port(&id), id, sandbox, _permit: permit };
-        retry("/health to answer", || try_get(&container.url("/health")));
-        container
+        World { container, network: None, _permit: permit }
     }
 
-    pub fn url(&self, path: &str) -> String {
-        format!("http://127.0.0.1:{}{path}", self.port)
+    /// The stock world, booted until ready.
+    pub fn boot() -> World {
+        World::boot_with(&[], &[])
     }
 
-    pub fn logs(&self) -> String {
-        let out = docker(&["logs", &self.id]);
-        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    /// A world created as by [`World::create`], booted until ready.
+    pub fn boot_with(files: &[(&str, &str)], options: &[&str]) -> World {
+        let world = World::create(files, options);
+        world.start();
+        world.wait_ready();
+        world
     }
 
-    pub fn exec(&self, command: &[&str]) -> Output {
-        let mut args = vec!["exec", self.id.as_str()];
-        args.extend_from_slice(command);
-        docker(&args)
+    pub fn id(&self) -> &str {
+        &self.container.0
     }
 
-    pub fn exec_ok(&self, command: &[&str]) -> String {
-        let out = self.exec(command);
-        assert!(
-            out.status.success(),
-            "{command:?} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    pub fn start(&self) {
+        docker_ok(&["start", self.id()]);
     }
 
-    pub fn wait_healthy(&self) {
-        retry("/health to pass", || try_get(&self.url("/health")).filter(|(code, _)| *code == 200));
-    }
-
-    pub fn wait_for_log(&self, needle: &str, limit: Duration) {
-        let deadline = Instant::now() + limit;
-        while !self.logs().contains(needle) {
-            assert!(Instant::now() < deadline, "no '{needle}' in the logs:\n{}", self.logs());
+    /// Wait for the ready marker, as the compose healthcheck does.
+    pub fn wait_ready(&self) {
+        let deadline = Instant::now() + BOOT_LIMIT;
+        while !self.exec(&["test", "-e", "/miroir/run/ready"]).status.success() {
+            assert!(self.running(), "the world stopped before it was ready:\n{}", self.logs());
+            assert!(Instant::now() < deadline, "the world was not ready in time:\n{}", self.logs());
             std::thread::sleep(Duration::from_millis(200));
         }
     }
 
+    fn running(&self) -> bool {
+        docker_ok(&["inspect", "--format", "{{.State.Running}}", self.id()]) == "true"
+    }
+
+    /// Wait for the world's container to end; its exit status. A world that becomes ready
+    /// instead, or still runs after the boot limit, fails the test.
     pub fn wait_exit(&self) -> i32 {
-        docker_ok(&["wait", &self.id]).parse().unwrap()
-    }
-}
-
-pub fn retry<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        if let Some(value) = probe() {
-            return value;
+        let deadline = Instant::now() + BOOT_LIMIT;
+        while self.running() {
+            let ready = self.exec(&["test", "-e", "/miroir/run/ready"]).status.success();
+            assert!(!ready, "the world booted instead of stopping:\n{}", self.logs());
+            assert!(Instant::now() < deadline, "the world did not stop in time:\n{}", self.logs());
+            std::thread::sleep(Duration::from_millis(200));
         }
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(200));
+        docker_ok(&["inspect", "--format", "{{.State.ExitCode}}", self.id()]).parse().unwrap()
     }
-}
 
-fn published_port(id: &str) -> u16 {
-    retry("a published port", || {
-        let mapped =
-            String::from_utf8_lossy(&docker(&["port", id, "8000/tcp"]).stdout).trim().to_string();
-        mapped.rsplit(':').next().and_then(|port| port.parse().ok())
-    })
-}
-
-impl Drop for Container {
-    fn drop(&mut self) {
-        let _ = docker(&["rm", "-f", &self.id]);
+    /// Wait until the world's log holds `text`.
+    pub fn wait_log(&self, text: &str) {
+        let deadline = Instant::now() + BOOT_LIMIT;
+        while !self.logs().contains(text) {
+            assert!(Instant::now() < deadline, "no {text:?} in time:\n{}", self.logs());
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
-}
 
-pub fn get(url: &str) -> (u16, String) {
-    try_get(url).unwrap_or_else(|| panic!("GET {url} failed"))
-}
+    /// Everything `miroir run` and the processes printed.
+    pub fn logs(&self) -> String {
+        text(&docker(&["logs", self.id()]))
+    }
 
-pub fn try_get(url: &str) -> Option<(u16, String)> {
-    use std::io::{Read, Write};
-    let rest = url.strip_prefix("http://")?;
-    let (host, path) =
-        rest.split_once('/').map_or((rest, "/".to_string()), |(h, p)| (h, format!("/{p}")));
-    let mut stream = std::net::TcpStream::connect(host).ok()?;
-    stream.set_read_timeout(Some(Duration::from_secs(30))).ok()?;
-    write!(stream, "GET {path} HTTP/1.0\r\nHost: {host}\r\n\r\n").ok()?;
-    let mut response = String::new();
-    stream.read_to_string(&mut response).ok()?;
-    let (head, body) = response.split_once("\r\n\r\n")?;
-    Some((head.split_whitespace().nth(1)?.parse().ok()?, body.to_string()))
-}
+    pub fn exec(&self, argv: &[&str]) -> Output {
+        docker(&[&["exec", self.id()], argv].concat())
+    }
 
-pub fn manifest_with_processes(processes: &str) -> String {
-    format!(
-        r#"miroir: 1
-name: acme-crm
-description: test manifest
-processes:
-  - name: db
-    command: [postgres, -D, /var/lib/postgresql/data]
-    user: postgres
-    datastore: true
-    ready: {{tcp: 5432}}
-{processes}
-state: [/var/lib/postgresql/data, /var/lib/redis, /app/uploads]
-apps:
-  crm:
-    api: {{base_url: "http://127.0.0.1:3000"}}
-    mcp: {{url: "http://127.0.0.1:3100/mcp"}}
-    database: {{url: "postgres://postgres@127.0.0.1:5432/crm"}}
-personas:
-  sales_manager: {{description: Dana, headers: {{crm: {{Authorization: Bearer seed-token-dana}}}}}}
-"#
-    )
-}
+    /// Run `argv` in the world, which must succeed; its trimmed stdout.
+    pub fn exec_ok(&self, argv: &[&str]) -> String {
+        let out = self.exec(argv);
+        assert!(out.status.success(), "{argv:?} failed in the world:\n{}", text(&out));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
 
-pub fn baked_at(image: &str) -> jiff::Timestamp {
-    build_images();
-    let info = docker_ok(&["run", "--rm", "--entrypoint", "cat", image, "/miroir/bake.json"]);
-    let info: serde_json::Value = serde_json::from_str(&info).unwrap();
-    info["baked_at"].as_str().unwrap().parse().unwrap()
-}
-
-impl Container {
+    /// Run `sql` against the graded database as its superuser; the rows, `|`-separated.
     pub fn psql(&self, sql: &str) -> String {
-        self.psql_in("crm", sql)
+        let psql = ["psql", "-h", "127.0.0.1", "-U", "postgres", "-d", "crm"];
+        self.exec_ok(&[&psql[..], &["-v", "ON_ERROR_STOP=1", "-tAqc", sql]].concat())
     }
 
-    pub fn psql_in(&self, database: &str, sql: &str) -> String {
-        self.exec_ok(&["psql", "-h", "127.0.0.1", "-U", "postgres", "-d", database, "-tAqc", sql])
+    /// Run the collect hook as Harbor does, `sh -c 'miroir collect'` with the exec's bare
+    /// environment. It must succeed; its summary line.
+    pub fn collect(&self) -> String {
+        self.exec_ok(&["sh", "-c", "miroir collect"])
     }
 
-    pub fn product_get(&self, path: &str) -> serde_json::Value {
-        let headers = "{headers: {authorization: 'Bearer seed-token-dana'}}";
-        let script = format!(
-            "fetch('http://127.0.0.1:3000{path}', {headers})\
-             .then(r => r.text()).then(t => process.stdout.write(t))"
-        );
-        serde_json::from_str(&self.exec_ok(&["node", "-e", &script])).unwrap()
-    }
-}
-
-type Socket =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-pub struct Session {
-    socket: Socket,
-}
-
-impl Session {
-    pub async fn connect(env: &Container) -> Session {
-        Session::connect_url(&format!("ws://127.0.0.1:{}/ws", env.port)).await
+    /// The evidence file collect wrote, copied out of the world.
+    pub fn evidence(&self) -> Evidence {
+        let scratch = Scratch::new("evidence");
+        let path = scratch.file("evidence.db");
+        let copied = self.container.copy_out("/miroir/evidence/evidence.db", &path);
+        assert!(copied, "no evidence in the world:\n{}", self.logs());
+        Evidence { path, _scratch: scratch }
     }
 
-    pub async fn connect_url(url: &str) -> Session {
-        let (socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
-        Session { socket }
-    }
-
-    pub async fn send(&mut self, frame: serde_json::Value) -> serde_json::Value {
-        use futures_util::SinkExt;
-        let text = tokio_tungstenite::tungstenite::Message::Text(frame.to_string().into());
-        self.socket.send(text).await.unwrap();
-        self.receive().await.expect("a reply frame")
-    }
-
-    pub async fn ping_during(&mut self, frame: serde_json::Value) -> Duration {
-        use futures_util::{SinkExt, StreamExt};
-        use tokio_tungstenite::tungstenite::Message;
-        self.socket.send(Message::Text(frame.to_string().into())).await.unwrap();
-        self.socket.send(Message::Ping(Vec::new().into())).await.unwrap();
-        let started = Instant::now();
-        loop {
-            match self.socket.next().await.expect("the socket stays open").unwrap() {
-                Message::Pong(_) => return started.elapsed(),
-                Message::Text(text) => panic!("a reply before the pong: {text}"),
-                _ => {}
-            }
+    /// Run a fixture task's golden solution, or its probe `n`, as Harbor's oracle does: in a
+    /// container of the agent's image, on a network where the world answers as `acme-crm`. It
+    /// must succeed; the answer it wrote, if any.
+    pub fn solve(&mut self, task: &str, probe: Option<u32>) -> Option<String> {
+        let network = self.network();
+        let solution = probe.map(|n| format!("SOLUTION={n}"));
+        let mut args = vec!["--network", &network];
+        if let Some(solution) = &solution {
+            args.extend(["--env", solution]);
         }
+        args.extend([MAIN, "bash", "-c", "mkdir -p /logs/artifacts && bash /solution/solve.sh"]);
+        let main = Container::create(&args);
+        let from = fixture(&format!("tasks/{task}/solution")).display().to_string();
+        docker_ok(&["cp", &from, &format!("{}:/solution", main.0)]);
+        let (status, stdout, stderr) = main.run();
+        assert_eq!(status, 0, "{task} {solution:?} failed:\n{stdout}{stderr}");
+        let scratch = Scratch::new("answer");
+        let answer = scratch.file("answer.txt");
+        main.copy_out("/logs/artifacts/answer.txt", &answer)
+            .then(|| std::fs::read_to_string(answer).unwrap())
     }
 
-    pub async fn receive(&mut self) -> Option<serde_json::Value> {
-        use futures_util::StreamExt;
-        while let Some(message) = self.socket.next().await {
-            match message.ok()? {
-                tokio_tungstenite::tungstenite::Message::Text(text) => {
-                    return Some(serde_json::from_str(text.as_str()).unwrap());
-                }
-                tokio_tungstenite::tungstenite::Message::Close(_) => return None,
-                _ => {}
-            }
+    /// The world's own network, made on first use.
+    fn network(&mut self) -> String {
+        if let Some(Network(network)) = &self.network {
+            return network.clone();
         }
-        None
-    }
-
-    pub async fn close(mut self) {
-        use futures_util::SinkExt;
-        let text = tokio_tungstenite::tungstenite::Message::Text(
-            serde_json::json!({"type": "close"}).to_string().into(),
-        );
-        self.socket.send(text).await.unwrap();
-        assert!(self.receive().await.is_none(), "the server closes the session");
-    }
-
-    pub async fn reset(&mut self, data: serde_json::Value) -> serde_json::Value {
-        let reply = self.send(serde_json::json!({"type": "reset", "data": data})).await;
-        assert_eq!(reply["type"], "observation", "reset failed: {reply}");
-        reply["data"].clone()
-    }
-
-    pub async fn step(&mut self, data: serde_json::Value) -> serde_json::Value {
-        self.send(serde_json::json!({"type": "step", "data": data})).await
-    }
-
-    pub async fn state(&mut self) -> serde_json::Value {
-        let reply = self.send(serde_json::json!({"type": "state"})).await;
-        assert_eq!(reply["type"], "state", "{reply}");
-        reply["data"].clone()
+        let name = format!("{LABEL}-{}", &self.id()[..12]);
+        docker_ok(&["network", "create", "--label", LABEL, &name]);
+        self.network = Some(Network(name.clone()));
+        docker_ok(&["network", "connect", "--alias", "acme-crm", &name, self.id()]);
+        name
     }
 }
 
-pub fn run_check(
-    image: &str,
-    files: &[(&str, &str)],
-    tasks: &[(&str, &str)],
-) -> (i32, serde_json::Value, String) {
-    run_check_with(image, files, tasks, "")
+/// An evidence file copied out of a world.
+pub struct Evidence {
+    path: PathBuf,
+    _scratch: Scratch,
 }
 
-pub fn run_check_with(
-    image: &str,
-    files: &[(&str, &str)],
-    tasks: &[(&str, &str)],
-    flags: &str,
-) -> (i32, serde_json::Value, String) {
-    check_beside(image, files, tasks, flags, None)
+impl Evidence {
+    /// Each row of `sql`, a query whose one column is JSON text, read with the library's own
+    /// evidence reader.
+    pub fn rows(&self, sql: &'static str) -> Vec<Value> {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let mut conn = miroir::evidence::open(&self.path, false).await.unwrap();
+            let rows: Vec<String> = sqlx::query_scalar(sql).fetch_all(&mut conn).await.unwrap();
+            rows.iter().map(|row| serde_json::from_str(row).unwrap()).collect()
+        })
+    }
+
+    /// The `(tbl, op)` of every row of `changes`, in order.
+    pub fn changes(&self) -> Vec<(String, String)> {
+        let rows = self.rows("SELECT json_array(tbl, op) FROM changes ORDER BY id");
+        rows.iter()
+            .map(|row| (row[0].as_str().unwrap().into(), row[1].as_str().unwrap().into()))
+            .collect()
+    }
+
+    /// The `kind` of every row of `faults`, in order.
+    pub fn faults(&self) -> Vec<String> {
+        let rows = self.rows("SELECT json_array(kind) FROM faults ORDER BY seq");
+        rows.iter().map(|row| row[0].as_str().unwrap().to_string()).collect()
+    }
 }
 
-pub fn run_check_with_sandbox(
-    image: &str,
-    tasks: &[(&str, &str)],
-) -> (i32, serde_json::Value, String) {
-    let sandbox = Sandbox::start();
-    check_beside(image, &[], tasks, "", Some(&sandbox))
+/// What the grader did with a trial.
+pub struct Graded {
+    pub exit: i32,
+    /// The summary, or `void: <reason>`.
+    pub stdout: String,
+    /// `/logs/verifier/reward.json`, when it was written.
+    pub reward: Option<Value>,
+    /// `/logs/verifier/reward-details.json`, when it was written.
+    pub details: Option<Value>,
 }
 
-pub struct Imported {
-    pub code: i32,
-    pub log: String,
-    pub out: std::collections::BTreeMap<String, Vec<u8>>,
-    pub listing: String,
-}
-
-pub fn run_import(image: &str, dir: &str, inputs: &[(&str, &[u8])], flags: &[&str]) -> Imported {
-    let parent = dir.strip_suffix("/in").expect("the inputs go in a directory named in");
-    let parent = if parent.is_empty() { "/" } else { parent };
-    build_images();
-    let _permit = Permit::acquire();
-    let label = pid_label();
-    let run = format!("chown 4242:4242 /out && exec tini -- miroir import {}", flags.join(" "));
-    let create = ["create", "--label", &label, "--network", "none", "--entrypoint", "sh"];
-    let id = docker_ok(&[&create[..], &[image, "-c", &run]].concat());
-    let scratch = std::env::temp_dir().join(format!("miroir-import-{id}"));
-    std::fs::create_dir_all(scratch.join("in")).unwrap();
-    std::fs::create_dir_all(scratch.join("out")).unwrap();
-    for (name, contents) in inputs {
-        std::fs::write(scratch.join("in").join(name), contents).unwrap();
+/// Grade as Harbor's separate verifier does: `/tests/test.sh` in the grader image, with `spec`
+/// in `MIROIR_SPEC`, and the evidence and answer restored where collect and the agent left them.
+/// The grader must print nothing on stderr.
+pub fn grade(spec: &str, evidence: Option<&Evidence>, answer: Option<&str>) -> Graded {
+    images();
+    let inputs = Scratch::new("verifier");
+    let restored = inputs.file("miroir/evidence/evidence.db");
+    if let Some(evidence) = evidence {
+        std::fs::copy(&evidence.path, restored).unwrap();
     }
-    docker_ok(&["cp", scratch.join("in").to_str().unwrap(), &format!("{id}:{parent}")]);
-    docker_ok(&["cp", scratch.join("out").to_str().unwrap(), &format!("{id}:/")]);
-    docker_ok(&["start", &id]);
-    let code: i32 = docker_ok(&["wait", &id]).parse().unwrap();
-    let logs = docker(&["logs", &id]);
-    let log = format!(
-        "{}{}",
-        String::from_utf8_lossy(&logs.stdout),
-        String::from_utf8_lossy(&logs.stderr)
-    );
-    let back = scratch.join("back");
-    docker_ok(&["cp", &format!("{id}:/out"), back.to_str().unwrap()]);
-    let mut out = std::collections::BTreeMap::new();
-    for entry in std::fs::read_dir(&back).unwrap() {
-        let path = entry.unwrap().path();
-        out.insert(
-            path.file_name().unwrap().to_string_lossy().into_owned(),
-            std::fs::read(&path).unwrap(),
-        );
+    let answered = inputs.file("logs/artifacts/answer.txt");
+    if let Some(answer) = answer {
+        std::fs::write(answered, answer).unwrap();
     }
-    let tar = docker(&["cp", &format!("{id}:/out"), "-"]).stdout;
-    let mut list = Command::new("tar")
-        .args(["-tvf", "-"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::io::Write::write_all(list.stdin.as_mut().unwrap(), &tar).unwrap();
-    let listing = String::from_utf8_lossy(&list.wait_with_output().unwrap().stdout).into_owned();
-    let _ = docker(&["rm", "-f", &id]);
-    let _ = std::fs::remove_dir_all(&scratch);
-    Imported { code, log, out, listing }
-}
-
-fn check_beside(
-    image: &str,
-    files: &[(&str, &str)],
-    tasks: &[(&str, &str)],
-    flags: &str,
-    sandbox: Option<&Sandbox>,
-) -> (i32, serde_json::Value, String) {
-    build_images();
-    let _permit = Permit::acquire();
-    let replace = format!(
-        "rm -rf /miroir/tasks/* && cp /miroir/test-tasks/*.yaml /miroir/tasks/ \
-         && exec tini -- miroir check --json {flags}"
-    );
-    let label = pid_label();
-    let mut args = vec!["create", "--label", &label];
-    match sandbox {
-        Some(sandbox) => {
-            args.extend([
-                "--network",
-                &sandbox.network,
-                "-e",
-                "MIROIR_SANDBOX=http://sandbox:8000",
-            ]);
-        }
-        None => args.extend(["--network", "none"]),
-    }
-    if tasks.is_empty() {
-        args.extend([image, "check", "--json"]);
-        args.extend(flags.split_whitespace());
-    } else {
-        args.extend(["--entrypoint", "sh", image, "-c", &replace]);
-    }
-    let id = docker_ok(&args);
-    let scratch = std::env::temp_dir().join(format!("miroir-check-{id}"));
-    let renamed: Vec<(String, &str)> = tasks
-        .iter()
-        .map(|(name, yaml)| (format!("/miroir/test-tasks/{name}.yaml"), *yaml))
-        .collect();
-    let all = files.iter().map(|(p, c)| ((*p).to_string(), *c)).chain(renamed);
-    for (target, contents) in all {
-        let source = scratch.join(target.trim_start_matches('/'));
-        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
-        std::fs::write(&source, contents).unwrap();
-        let parent = Path::new(&target).parent().unwrap().to_str().unwrap().to_string();
-        if parent == "/miroir/test-tasks" {
-            docker_ok(&[
-                "cp",
-                scratch.join("miroir/test-tasks").to_str().unwrap(),
-                &format!("{id}:/miroir/"),
-            ]);
-        } else {
-            docker_ok(&["cp", source.to_str().unwrap(), &format!("{id}:{parent}/")]);
-        }
-    }
-    let _ = std::fs::remove_dir_all(&scratch);
-    docker_ok(&["start", &id]);
-    let code: i32 = docker_ok(&["wait", &id]).parse().unwrap();
-    let out = docker(&["logs", &id]);
-    let _ = docker(&["rm", "-f", &id]);
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let report = serde_json::from_str(&stdout).unwrap_or(serde_json::Value::Null);
-    (code, report, String::from_utf8_lossy(&out.stderr).to_string())
+    let variable = format!("MIROIR_SPEC={spec}");
+    let grader = Container::create(&["--env", &variable, GRADER, "/tests/test.sh"]);
+    grader.copy_in(&inputs.0);
+    let (exit, stdout, stderr) = grader.run();
+    assert_eq!(stderr, "", "the grader writes nothing on stderr");
+    let outputs = Scratch::new("verifier-out");
+    let verifier = outputs.0.join("verifier");
+    grader.copy_out("/logs/verifier", &verifier);
+    let read = |name: &str| {
+        let bytes = std::fs::read(verifier.join(name)).ok()?;
+        Some(serde_json::from_slice(&bytes).unwrap())
+    };
+    Graded { exit, stdout, reward: read("reward.json"), details: read("reward-details.json") }
 }

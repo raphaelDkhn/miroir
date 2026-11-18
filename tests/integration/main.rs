@@ -1,15 +1,9 @@
+//! Docker integration tests: the fixture's world image booted, driven, collected and
+//! graded in real containers, with the images `docker buildx bake` builds. They are ignored by
+//! default: `cargo test --locked --test integration -- --ignored`.
 #![cfg(test)]
 
-mod apps;
-mod check;
-mod clock;
-mod code;
+mod boot;
+mod capture;
 mod common;
-mod coworkers;
-mod export;
-mod grade;
-mod import;
-mod mcp;
-mod reset;
-mod server;
-mod supervisor;
+mod pipeline;

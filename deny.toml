@@ -1,7 +1,7 @@
 [advisories]
 ignore = [
     # Remove once sqlx allows libsqlite3-sys >= 0.39; sqlx-sqlite 0.9.0 caps it below 0.38.
-    { id = "RUSTSEC-2026-0459", reason = "needs a database file an attacker wrote; miroir opens only /miroir/episode.db, which it creates itself as root with mode 0600" },
+    { id = "RUSTSEC-2026-0459", reason = "needs a database file an attacker wrote; miroir opens only evidence files, which miroir collect writes as a root process in the world service, out of the agent's reach" },
 ]
 
 [licenses]

@@ -1,0 +1,18 @@
+# Grader self-test for the Gitea datasets: the reference solution, doing nothing, and probes 1-4
+# of every task. Generate the datasets first (README), then from the repository root:
+#   harbor run -c examples/gitea/check.yaml -n 8 --job-name gitea-gate
+#   miroir check --tasks examples/gitea/datasets jobs/gitea-gate
+# Every agent runs every task, so a task with fewer than 4 probes wastes the slots above its
+# count; miroir check skips them. Ignore Harbor's means for this job: miroir check is the verdict.
+n_concurrent_trials: 4
+datasets:
+  - path: examples/gitea/datasets/train
+  - path: examples/gitea/datasets/validation
+  - path: examples/gitea/datasets/test
+agents:
+  - name: oracle
+  - name: nop
+  - {name: oracle, env: {SOLUTION: "1"}}
+  - {name: oracle, env: {SOLUTION: "2"}}
+  - {name: oracle, env: {SOLUTION: "3"}}
+  - {name: oracle, env: {SOLUTION: "4"}}

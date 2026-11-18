@@ -1,215 +1,138 @@
-//! The env manifest, `/miroir/miroir.yaml`: its types, defaults and validation.
+//! The manifest, `/miroir/miroir.yaml`: how to run the product, bake its world, and which ports the
+//! agent may reach. Unknown keys are errors, and every error names the field path, such as
+//! `processes[2].ready.http`, and the fix.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path, PathBuf};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
+use axum::http::{HeaderName, HeaderValue};
 use reqwest::Url;
-use serde::Deserialize;
-use serde_json::{Map, Value};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer};
+use serde_json::Value;
 
-const REQUEST_KEYS: [&str; 4] = ["app", "method", "path", "body"];
-/// Longest timeout any field takes: a day.
-pub const MAX_TIMEOUT_S: u64 = 86_400;
-
-/// A manifest or task file that fails to read, parse or validate.
-#[derive(Debug, thiserror::Error)]
-#[error("{file}: {message}")]
-pub struct ManifestError {
-    pub file: String,
-    pub message: String,
-}
-
-#[derive(Debug, Deserialize)]
+/// A world's manifest.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
-    /// Format version; must be 1.
-    pub miroir: u32,
-    pub name: String,
-    pub description: String,
-    /// What miroir starts, datastores first.
+    /// The only TCP ports that may listen off loopback: the agent's door.
+    pub expose: Vec<u16>,
+    /// Datastores first.
     pub processes: Vec<Process>,
-    /// Variables for every process and command miroir runs.
+    /// Layered over the container's environment for every process and command.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    /// Commands that create the seed data, run with only the datastores up and
-    /// `MIROIR_WORLD` naming the world.
+    /// Commands run at build with only the datastores up.
     #[serde(default)]
     pub bake: Vec<Vec<String>>,
-    /// Commands run at bake once the apps are up, such as seeding through the API.
+    /// Commands run at build with every process up.
     #[serde(default)]
     pub seed: Vec<Vec<String>>,
-    /// Seed snapshots, each baked apart; each task resets to one.
-    #[serde(default = "default_worlds")]
-    pub worlds: Vec<String>,
-    /// Paths each reset restores; when unset, the paths the processes' users can write.
-    pub state: Option<Vec<PathBuf>>,
-    /// Apps by name, each with an API, an MCP server or a database.
-    pub apps: BTreeMap<String, App>,
-    /// System prompt the task listings carry, for the adapters.
-    pub system_prompt: Option<String>,
-    /// How the data's dates follow the real clock.
-    #[serde(default)]
-    pub time: Time,
-    /// Users the agent can act as, by name.
-    pub personas: BTreeMap<String, Persona>,
-    /// Servers that stand in for the outside world and record what reaches them.
-    #[serde(default)]
-    pub sinks: Sinks,
-    /// Command that tells when the apps' background work has settled.
-    pub quiet: Option<Quiet>,
+    pub database: Database,
+    pub sinks: Option<Sinks>,
+    /// A command that exits 0 when background work is done.
+    pub quiet: Option<Vec<String>>,
 }
 
-/// A process miroir supervises.
-#[derive(Debug, Deserialize)]
+/// A process of the world.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Process {
     pub name: String,
     pub command: Vec<String>,
-    /// User it runs as; unset means root, which `check` fails.
+    /// The user to run as; `None` runs as Miroir's own user (root).
     pub user: Option<String>,
     pub cwd: Option<PathBuf>,
+    /// Overrides the manifest `env` for this process.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    /// Started first, and alone while a reset restores and shifts the data.
+    /// Started before the date shift and before every other process.
     #[serde(default)]
     pub datastore: bool,
-    /// How miroir tells it's ready.
     pub ready: Option<Ready>,
 }
 
-/// A readiness probe: a loopback TCP port, or an `http://` URL that answers 2xx or 3xx.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Ready {
-    pub tcp: Option<u16>,
-    pub http: Option<String>,
-    /// Seconds to wait; 60 by default.
-    #[serde(default = "default_ready_timeout")]
-    pub timeout_s: u64,
+/// How to tell that a process is ready, on 127.0.0.1.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Ready {
+    Tcp(u16),
+    Http(String),
 }
 
-/// An app: an HTTP API, an MCP server, a database, or several.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct App {
-    /// What it is, which the tools show the agent when several apps have an API.
-    pub description: Option<String>,
-    pub api: Option<Api>,
-    pub mcp: Option<Mcp>,
-    pub database: Option<Database>,
-}
-
-/// The app's MCP server, at a loopback `http://` URL.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Mcp {
-    pub url: String,
-}
-
-/// The app's Postgres or `MySQL` database, whose changes grading reads.
-#[derive(Debug, Deserialize)]
+/// The graded database.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Database {
-    /// URL miroir connects with, as a user that can install triggers.
+    /// `postgres://…/<db>`, reached as a superuser.
     pub url: String,
-    /// Schemas to read; all of them when unset.
-    pub schemas: Option<Vec<String>>,
-    /// Tables, or `table.column`s, whose changes never count.
+    /// `table` or `table.column` entries left out of capture.
     #[serde(default)]
     pub ignore: Vec<String>,
-    /// How its time columns move.
     #[serde(default)]
     pub time: DbTime,
 }
 
-/// How a database's time columns move with the clock.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// How the date shift treats the database's time columns.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct DbTime {
-    /// Columns, as `table.column`, that never move, such as birthdays.
-    #[serde(default)]
+    /// `table.column` entries never shifted.
     pub exclude: Vec<String>,
-    /// Integer columns that hold Unix time, as `table.column` globs, with their unit.
-    #[serde(default)]
+    /// `table.column` globs of integer columns holding Unix time.
     pub epoch: BTreeMap<String, EpochUnit>,
+    /// When the data the `bake` commands restore was captured.
+    #[serde(deserialize_with = "rfc3339")]
+    pub captured: Option<jiff::Timestamp>,
 }
 
-/// How the data's dates follow the real clock.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Time {
-    /// When the seed data is dated: `bake`, the default, or an RFC 3339 instant.
-    #[serde(default = "default_anchor")]
-    pub anchor: String,
-    /// Command that moves the dates in place of miroir, given `MIROIR_SHIFT_DAYS` and
-    /// `MIROIR_SHIFT_DATE_DAYS`.
-    pub hook: Option<Vec<String>>,
-    /// When each captured world's snapshot was taken; bake moves its data to the anchor.
-    #[serde(default)]
-    pub captured: BTreeMap<String, jiff::Timestamp>,
+/// An RFC 3339 timestamp, with an error that says so.
+fn rfc3339<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<jiff::Timestamp>, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    let timestamp = text.parse().map_err(|e| {
+        let example = "such as 2026-10-26T06:00:00Z";
+        D::Error::custom(format!("'{text}' is not an RFC 3339 timestamp, {example}: {e}"))
+    })?;
+    Ok(Some(timestamp))
 }
 
-/// Unit of an integer Unix-time column.
+/// The unit of a Unix-time column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum EpochUnit {
-    #[serde(rename = "s")]
-    Seconds,
-    #[serde(rename = "ms")]
-    Milliseconds,
+    S,
+    Ms,
 }
 
 impl EpochUnit {
-    /// Units in a second.
+    /// Units per second: 1 or 1000.
     pub fn per_second(self) -> i64 {
         match self {
-            EpochUnit::Seconds => 1,
-            EpochUnit::Milliseconds => 1000,
+            EpochUnit::S => 1,
+            EpochUnit::Ms => 1000,
         }
     }
 }
 
-/// The app's HTTP API.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Api {
-    /// Loopback `http://` base URL the tools call.
-    pub base_url: String,
-    /// Path of its `OpenAPI` spec, which `api_docs` serves.
-    pub openapi: Option<PathBuf>,
-    /// Keys dropped from its JSON answers at any depth: `key` or `parent.key` globs.
-    #[serde(default)]
-    pub omit: Vec<String>,
-}
-
-/// A user the agent acts as.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Persona {
-    pub description: String,
-    /// Headers pinned on its requests, by app, such as a bearer token.
-    #[serde(default)]
-    pub headers: BTreeMap<String, BTreeMap<String, String>>,
-}
-
-/// Loopback servers that stand in for the outside world and record what reaches them.
-#[derive(Debug, Default, Deserialize)]
+/// The loopback recorders of outbound email and HTTP.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sinks {
-    /// Port of the SMTP sink.
     pub smtp: Option<u16>,
-    /// Port of the HTTP sink.
     pub http: Option<u16>,
-    /// Canned answers by `[METHOD ]/path`, a trailing `*` matching a prefix; others get
-    /// 200 and `{}`.
+    /// Canned HTTP answers by `"[METHOD ]/path[*]"`.
     #[serde(default)]
     pub responses: BTreeMap<String, CannedResponse>,
 }
 
-/// What the HTTP sink answers a matching request.
+/// A canned HTTP answer of the HTTP sink.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CannedResponse {
-    #[serde(default = "default_status")]
+    /// 200 when left out.
+    #[serde(default = "ok")]
     pub status: u16,
     pub json: Option<Value>,
     pub body: Option<String>,
@@ -217,893 +140,662 @@ pub struct CannedResponse {
     pub headers: BTreeMap<String, String>,
 }
 
-/// A command that exits 0 once the apps' background work is done; it must pass twice
-/// in a row.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Quiet {
-    pub command: Vec<String>,
-    /// Seconds to wait for it; 30 by default.
-    #[serde(default = "default_quiet_timeout")]
-    pub timeout_s: u64,
-}
-
-fn default_ready_timeout() -> u64 {
-    60
-}
-fn default_quiet_timeout() -> u64 {
-    30
-}
-fn default_status() -> u16 {
+fn ok() -> u16 {
     200
 }
-fn default_anchor() -> String {
-    "bake".into()
-}
-fn default_worlds() -> Vec<String> {
-    vec!["default".into()]
-}
 
-impl Default for Time {
-    fn default() -> Self {
-        Time { anchor: default_anchor(), hook: None, captured: BTreeMap::new() }
-    }
+/// A manifest error: the field path and what to change.
+#[derive(Debug, thiserror::Error)]
+#[error("{field}: {message}")]
+pub struct ManifestError {
+    pub field: String,
+    pub message: String,
 }
 
 impl Manifest {
-    /// Read and validate a manifest.
+    /// Load and validate the manifest at `path`.
     pub fn load(path: &Path) -> Result<Manifest, ManifestError> {
-        let manifest: Manifest = parse_file(path)?;
-        manifest.validate().map_err(|message| error(path, message))?;
-        Ok(manifest)
+        let file = path.display().to_string();
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            let fix = "a world image copies it there with COPY miroir.yaml /miroir/miroir.yaml \
+                       and runs miroir as root, with USER root as its last USER";
+            error(&file, format!("cannot read the manifest: {e}; {fix}"))
+        })?;
+        parse(&text, &file)
     }
 
-    /// The fixed anchor, or `None` when it is `bake`.
-    pub fn anchor(&self) -> Option<jiff::Timestamp> {
-        self.time.anchor.parse().ok()
+    /// The datastore processes, in manifest order.
+    pub fn datastores(&self) -> Vec<&Process> {
+        self.processes.iter().filter(|process| process.datastore).collect()
     }
 
-    pub fn datastores(&self) -> impl Iterator<Item = &Process> {
-        self.processes.iter().filter(|p| p.datastore)
+    /// The other processes, in manifest order.
+    pub fn apps(&self) -> Vec<&Process> {
+        self.processes.iter().filter(|process| !process.datastore).collect()
     }
 
-    pub fn app_processes(&self) -> impl Iterator<Item = &Process> {
-        self.processes.iter().filter(|p| !p.datastore)
-    }
-
-    pub fn apis(&self) -> impl Iterator<Item = (&str, &Api)> {
-        self.apps.iter().filter_map(|(name, app)| Some((name.as_str(), app.api.as_ref()?)))
-    }
-
-    /// The one app with an MCP server, if any.
-    pub fn mcp(&self) -> Option<(&str, &Mcp)> {
-        self.apps.iter().find_map(|(name, app)| Some((name.as_str(), app.mcp.as_ref()?)))
-    }
-
-    pub fn databases(&self) -> impl Iterator<Item = (&str, &Database)> {
-        self.apps.iter().filter_map(|(name, app)| Some((name.as_str(), app.database.as_ref()?)))
-    }
-
-    /// The app with a database, when only one has one.
-    pub fn only_database(&self) -> Option<&str> {
-        let mut names = self.databases().map(|(name, _)| name);
-        let first = names.next()?;
-        names.next().is_none().then_some(first)
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), String> {
-        ensure(self.miroir == 1, format!("miroir must be 1, got {}", self.miroir))?;
-        ensure(is_slug(&self.name), "name must be letters, digits, '.', '_' or '-'")?;
-        self.validate_processes()?;
-        ensure_env_names(self.env.keys())?;
-        for command in &self.bake {
-            ensure(!command.is_empty(), "bake commands must not be empty")?;
-        }
-        for command in &self.seed {
-            ensure(!command.is_empty(), "seed commands must not be empty")?;
-        }
-        self.validate_worlds()?;
-        match &self.state {
-            Some(dirs) => validate_state(dirs)?,
-            None => self.validate_derivable()?,
-        }
-        self.validate_apps()?;
-        if let Some(prompt) = &self.system_prompt {
-            ensure(!prompt.trim().is_empty(), "system_prompt must not be empty")?;
-        }
-        self.validate_time()?;
-        self.validate_personas()?;
-        validate_sinks(&self.sinks)?;
-        if let Some(quiet) = &self.quiet {
-            ensure(!quiet.command.is_empty(), "quiet.command must not be empty")?;
-            ensure(
-                (1..=MAX_TIMEOUT_S).contains(&quiet.timeout_s),
-                format!("quiet.timeout_s must be 1 to {MAX_TIMEOUT_S}"),
-            )?;
-        }
-        Ok(())
-    }
-
-    fn validate_processes(&self) -> Result<(), String> {
-        ensure(!self.processes.is_empty(), "processes must list at least one process")?;
-        let mut names = BTreeSet::new();
-        let mut apps_started = false;
-        for p in &self.processes {
-            let at = format!("process '{}'", p.name);
-            ensure(!p.name.is_empty(), "every process needs a name")?;
-            ensure(names.insert(&p.name), format!("{at} is listed twice"))?;
-            ensure(!p.command.is_empty(), format!("{at} has an empty command"))?;
-            ensure(!apps_started || !p.datastore, format!("{at}: datastores come first"))?;
-            apps_started |= !p.datastore;
-            if let Some(cwd) = &p.cwd {
-                ensure(cwd.is_absolute(), format!("{at}: cwd must be absolute"))?;
-            }
-            ensure_env_names(p.env.keys())?;
-            if let Some(ready) = &p.ready {
-                validate_ready(ready).map_err(|e| format!("{at}: {e}"))?;
-            }
-        }
-        ensure(self.datastores().next().is_some(), "at least one process must be a datastore")
-    }
-
-    fn validate_worlds(&self) -> Result<(), String> {
-        ensure(!self.worlds.is_empty(), "worlds must name at least one world, or be left out")?;
-        let mut names = BTreeSet::new();
-        for world in &self.worlds {
-            ensure(
-                is_world_name(world),
-                format!(
-                    "world '{world}' must be lowercase letters, digits, '_' or '-', starting with \
-                     a letter or digit"
-                ),
-            )?;
-            ensure(names.insert(world), format!("world '{world}' is listed twice"))?;
-        }
-        Ok(())
-    }
-
-    fn validate_derivable(&self) -> Result<(), String> {
-        for p in &self.processes {
-            let root = p.user.as_deref().is_none_or(|user| user == "root");
-            ensure(
-                !root,
-                format!(
-                    "process '{}' runs as root, and miroir derives state only from what \
-                     non-root users can write: give it a user, or list state",
-                    p.name
-                ),
-            )?;
-        }
-        Ok(())
-    }
-
-    fn validate_apps(&self) -> Result<(), String> {
-        ensure(!self.apps.is_empty(), "apps must name at least one app")?;
-        let several_apis = self.apis().nth(1).is_some();
-        for (name, app) in &self.apps {
-            ensure(
-                is_world_name(name),
-                format!(
-                    "app '{name}' must be lowercase letters, digits, '_' or '-', starting with a \
-                     letter or digit"
-                ),
-            )?;
-            let at = |e: String| format!("app '{name}': {e}");
-            ensure(
-                app.api.is_some() || app.mcp.is_some() || app.database.is_some(),
-                at("needs an api, an mcp server or a database".into()),
-            )?;
-            if let Some(mcp) = &app.mcp {
-                loopback_http(&mcp.url, "mcp.url").map_err(at)?;
-            }
-            if let Some(api) = &app.api {
-                validate_api(api).map_err(at)?;
-                let described = app.description.as_deref().is_some_and(|d| !d.trim().is_empty());
-                ensure(
-                    described || !several_apis,
-                    at("needs a description, since several apps have an api".into()),
-                )?;
-            }
-            if let Some(database) = &app.database {
-                validate_database(database).map_err(at)?;
-            }
-        }
-        ensure(self.apis().next().is_some(), "at least one app must have an api")?;
-        let servers = self.apps.values().filter(|app| app.mcp.is_some()).count();
-        ensure(servers <= 1, "only one app may name an mcp server")?;
-        let mut variables = BTreeMap::new();
-        for (name, _) in self.apis() {
-            let variable = api_variable(name);
-            if let Some(other) = variables.insert(variable.clone(), name) {
-                return Err(format!(
-                    "apps '{other}' and '{name}' would share the code tool's variable {variable}; \
-                     rename one"
-                ));
-            }
-        }
-        ensure(self.databases().next().is_some(), "at least one app must have a database")?;
-        self.validate_distinct_databases()
-    }
-
-    fn validate_distinct_databases(&self) -> Result<(), String> {
-        let mut seen: Vec<(&str, Url)> = Vec::new();
-        for (name, database) in self.databases() {
-            let url = Url::parse(&database.url).map_err(|e| e.to_string())?;
-            for (other, other_url) in &seen {
-                if server(&url) != server(other_url) {
-                    continue;
-                }
-                ensure(
-                    url.path() != other_url.path(),
-                    format!(
-                        "apps '{other}' and '{name}' name the same database; give the second \
-                         only an api, and grading counts its changes under '{other}'"
-                    ),
-                )?;
-                ensure(
-                    url.scheme() != "mysql",
-                    format!(
-                        "apps '{other}' and '{name}' have MySQL databases on one server, whose \
-                         changes miroir cannot tell apart: give each its own server"
-                    ),
-                )?;
-            }
-            seen.push((name, url));
-        }
-        Ok(())
-    }
-
-    fn validate_time(&self) -> Result<(), String> {
-        let anchor_ok = self.time.anchor == "bake" || self.anchor().is_some();
-        ensure(anchor_ok, "time.anchor must be 'bake' or an RFC 3339 instant")?;
-        if let Some(hook) = &self.time.hook {
-            ensure(!hook.is_empty(), "time.hook must not be empty when set")?;
-            ensure(
-                self.time.captured.is_empty(),
-                "time.captured can't go with time.hook: bake moves a captured world's databases, \
-                 not what the hook moves",
-            )?;
-        }
-        for world in self.time.captured.keys() {
-            ensure(
-                self.worlds.contains(world),
-                format!("time.captured names world '{world}', which worlds doesn't list"),
-            )?;
-        }
-        Ok(())
-    }
-
-    fn validate_personas(&self) -> Result<(), String> {
-        ensure(!self.personas.is_empty(), "personas must name at least one persona")?;
-        for (name, persona) in &self.personas {
-            for app in persona.headers.keys() {
-                let called = self.apps.get(app).is_some_and(|a| a.api.is_some() || a.mcp.is_some());
-                ensure(
-                    called,
-                    format!(
-                        "persona '{name}' has headers for '{app}', which is no app with an api or \
-                         an mcp server"
-                    ),
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Check an entry's `app` against the apps that have what it needs; with `needed`, it
-    /// is required when several do.
-    pub(crate) fn check_app(
-        &self,
-        at: &str,
-        app: Option<&str>,
-        pick: Pick,
-        needed: bool,
-    ) -> Result<(), String> {
-        let (kind, names): (&str, Vec<&str>) = match pick {
-            Pick::Api | Pick::Docs => ("an api", self.apis().map(|(name, _)| name).collect()),
-            Pick::Database => ("a database", self.databases().map(|(name, _)| name).collect()),
-        };
-        let several = names.len() > 1;
-        let Some(name) = app else {
-            return ensure(
-                !(needed && several),
-                format!(
-                    "{at}: app is required, since several apps have {kind}: {}",
-                    names.join(", ")
-                ),
-            );
-        };
-        ensure(several, format!("{at}: app applies only when several apps have {kind}"))?;
-        let app = self.apps.get(name).ok_or_else(|| format!("{at}: unknown app '{name}'"))?;
-        let (has, what) = match pick {
-            Pick::Api => (app.api.is_some(), "api"),
-            Pick::Docs => {
-                (app.api.as_ref().is_some_and(|api| api.openapi.is_some()), "api.openapi")
-            }
-            Pick::Database => (app.database.is_some(), "database"),
-        };
-        ensure(has, format!("{at}: app '{name}' has no {what}"))
-    }
-
-    /// Check that headers name apps with an API.
-    pub(crate) fn validate_headers(
-        &self,
-        at: &str,
-        headers: &BTreeMap<String, BTreeMap<String, String>>,
-    ) -> Result<(), String> {
-        for app in headers.keys() {
-            ensure(
-                self.apps.get(app).is_some_and(|a| a.api.is_some()),
-                format!("{at} has headers for '{app}', which is no app with an api"),
-            )?;
-        }
-        Ok(())
-    }
-
-    /// Check a request template: its keys, app, method and path.
-    pub(crate) fn validate_request(
-        &self,
-        at: &str,
-        request: &Map<String, Value>,
-    ) -> Result<(), String> {
-        if let Some(key) = request.keys().find(|key| !REQUEST_KEYS.contains(&key.as_str())) {
-            return Err(format!(
-                "{at}: '{key}' is not one of {}; the sender's headers go with every request",
-                REQUEST_KEYS.join(", ")
+    fn validate(&self) -> Result<(), ManifestError> {
+        if self.expose.is_empty() {
+            return Err(error(
+                "expose",
+                "list at least one port: the agent reaches the product there",
             ));
         }
-        let app = match request.get("app") {
-            None => None,
-            Some(Value::String(name)) => Some(name.as_str()),
-            Some(_) => return Err(format!("{at}: app must be a string")),
-        };
-        self.check_app(at, app, Pick::Api, true)?;
-        let method = request.get("method").and_then(Value::as_str);
-        ensure(
-            method.is_some_and(|m| ["GET", "POST", "PUT", "PATCH", "DELETE"].contains(&m)),
-            format!("{at}: method must be GET, POST, PUT, PATCH or DELETE"),
-        )?;
-        let path = request.get("path").and_then(Value::as_str);
-        ensure(path.is_some_and(|p| p.starts_with('/')), format!("{at}: path must start with /"))
+        for (i, port) in self.expose.iter().enumerate() {
+            tcp_port(*port, &format!("expose[{i}]"))?;
+        }
+        self.validate_processes()?;
+        env_names(&self.env, "env")?;
+        commands(&self.bake, "bake")?;
+        commands(&self.seed, "seed")?;
+        validate_database(&self.database)?;
+        if let Some(sinks) = &self.sinks {
+            validate_sinks(sinks)?;
+        }
+        match &self.quiet {
+            Some(quiet) => command(quiet, "quiet"),
+            None => Ok(()),
+        }
+    }
+
+    fn validate_processes(&self) -> Result<(), ManifestError> {
+        if !self.processes.iter().any(|process| process.datastore) {
+            let fix = "list the database first, with `datastore: true`";
+            return Err(error("processes", format!("no process is a datastore; {fix}")));
+        }
+        let mut names: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut first_app: Option<&str> = None;
+        for (i, process) in self.processes.iter().enumerate() {
+            let at = format!("processes[{i}]");
+            validate_process(process, &at)?;
+            if let Some(first) = names.insert(&process.name, i) {
+                let message =
+                    format!("'{}' is already the name of processes[{first}]", process.name);
+                return Err(error(format!("{at}.name"), format!("{message}; rename one")));
+            }
+            match (process.datastore, first_app) {
+                (true, Some(app)) => {
+                    let message =
+                        format!("datastore '{}' comes after the app '{app}'", process.name);
+                    let fix = "list every datastore before the other processes";
+                    return Err(error(format!("{at}.datastore"), format!("{message}; {fix}")));
+                }
+                (false, None) => first_app = Some(&process.name),
+                (true, None) | (false, Some(_)) => {}
+            }
+        }
+        Ok(())
     }
 }
 
-/// What an entry needs from its app.
-#[derive(Clone, Copy)]
-pub(crate) enum Pick {
-    Api,
-    Docs,
-    Database,
+fn validate_process(process: &Process, at: &str) -> Result<(), ManifestError> {
+    let name = &process.name;
+    if name.is_empty()
+        || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        let message = format!("'{name}' must be lower-case letters, digits and '-'");
+        return Err(error(format!("{at}.name"), message));
+    }
+    command(&process.command, &format!("{at}.command"))?;
+    if let Some(cwd) = &process.cwd
+        && !cwd.is_absolute()
+    {
+        let message = format!("'{}' must be an absolute path, such as /app", cwd.display());
+        return Err(error(format!("{at}.cwd"), message));
+    }
+    env_names(&process.env, &format!("{at}.env"))?;
+    match &process.ready {
+        Some(Ready::Tcp(port)) => tcp_port(*port, &format!("{at}.ready.tcp")),
+        Some(Ready::Http(url)) => loopback_http(url, &format!("{at}.ready.http")),
+        None => Ok(()),
+    }
 }
 
-fn validate_ready(ready: &Ready) -> Result<(), String> {
-    ensure(ready.tcp.is_some() != ready.http.is_some(), "ready needs exactly one of tcp or http")?;
-    ensure(
-        (1..=MAX_TIMEOUT_S).contains(&ready.timeout_s),
-        format!("ready.timeout_s must be 1 to {MAX_TIMEOUT_S}"),
-    )?;
-    if let Some(http) = &ready.http {
-        let url = Url::parse(http).map_err(|e| format!("ready.http is not a URL: {e}"))?;
-        ensure(url.scheme() == "http", "ready.http must be an http:// URL")?;
+fn validate_database(database: &Database) -> Result<(), ManifestError> {
+    let url = Url::parse(&database.url).ok();
+    let postgres = url.is_some_and(|url| {
+        ["postgres", "postgresql"].contains(&url.scheme()) && url.path().len() > 1
+    });
+    if !postgres {
+        let fix = "such as postgres://postgres@127.0.0.1:5432/app";
+        let message =
+            format!("'{}' must be a postgres:// URL naming the database, {fix}", database.url);
+        return Err(error("database.url", message));
+    }
+    for (i, entry) in database.ignore.iter().enumerate() {
+        if entry.is_empty() || entry.starts_with('.') || entry.ends_with('.') {
+            let message = format!("'{entry}' must be a table or table.column");
+            return Err(error(format!("database.ignore[{i}]"), message));
+        }
+    }
+    for (i, entry) in database.time.exclude.iter().enumerate() {
+        table_column(entry, &format!("database.time.exclude[{i}]"))?;
+    }
+    for glob in database.time.epoch.keys() {
+        table_column(glob, &format!("database.time.epoch.{glob}"))?;
     }
     Ok(())
 }
 
-fn validate_state(state: &[PathBuf]) -> Result<(), String> {
-    ensure(!state.is_empty(), "state must list at least one directory")?;
-    for dir in state {
-        let shown = dir.display();
-        ensure(dir.is_absolute(), format!("state directory {shown} must be absolute"))?;
-        let normal =
-            dir.components().all(|c| matches!(c, Component::RootDir | Component::Normal(_)));
-        ensure(
-            normal && dir.parent().is_some(),
-            format!("state directory {shown} is not allowed"),
-        )?;
-        ensure(!dir.starts_with("/miroir"), format!("state directory {shown} is inside /miroir"))?;
+fn validate_sinks(sinks: &Sinks) -> Result<(), ManifestError> {
+    for (port, at) in [(sinks.smtp, "sinks.smtp"), (sinks.http, "sinks.http")] {
+        if let Some(port) = port {
+            tcp_port(port, at)?;
+        }
     }
-    for a in state {
-        for b in state {
-            if !std::ptr::eq(a, b) && b.starts_with(a) {
-                return Err(format!(
-                    "state directories must not nest: {} contains {}",
-                    a.display(),
-                    b.display()
+    if let Some(port) = sinks.http
+        && sinks.smtp == Some(port)
+    {
+        let message = format!("{port} is also the port of sinks.smtp; give each sink its own");
+        return Err(error("sinks.http", message));
+    }
+    for (key, response) in &sinks.responses {
+        let at = format!("sinks.responses.{key}");
+        response_key(key, &at)?;
+        canned(response, &at)?;
+    }
+    Ok(())
+}
+
+/// A `"[METHOD ]/path[*]"` key of `sinks.responses`.
+fn response_key(key: &str, at: &str) -> Result<(), ManifestError> {
+    let path = match key.split_once(' ') {
+        Some((method, path)) => {
+            if method.is_empty() || !method.chars().all(|c| c.is_ascii_uppercase()) {
+                return Err(error(
+                    at,
+                    format!("'{method}' must be an upper-case method, as in POST"),
                 ));
             }
+            path
+        }
+        None => key,
+    };
+    if path.starts_with('/') && !path.strip_suffix('*').unwrap_or(path).contains('*') {
+        return Ok(());
+    }
+    let message = "must be \"[METHOD ]/path\", with one optional * at the end to match a prefix";
+    Err(error(at, message))
+}
+
+fn canned(response: &CannedResponse, at: &str) -> Result<(), ManifestError> {
+    if !(100..=599).contains(&response.status) {
+        let message = format!("{} is not an HTTP status; use 100 to 599", response.status);
+        return Err(error(format!("{at}.status"), message));
+    }
+    if response.json.is_some() && response.body.is_some() {
+        return Err(error(at, "sets both json and body; keep one"));
+    }
+    for (name, value) in &response.headers {
+        if HeaderName::from_bytes(name.as_bytes()).is_err() || HeaderValue::from_str(value).is_err()
+        {
+            let message = format!("'{name}: {value}' is not a valid HTTP header");
+            return Err(error(format!("{at}.headers"), message));
         }
     }
     Ok(())
 }
 
-fn validate_api(api: &Api) -> Result<(), String> {
-    loopback_http(&api.base_url, "api.base_url")?;
-    if let Some(openapi) = &api.openapi {
-        ensure(openapi.is_absolute(), "api.openapi must be an absolute path")?;
-    }
-    for pattern in &api.omit {
-        let named = braced(pattern).iter().all(|each| {
-            let parts: Vec<&str> = each.split('.').collect();
-            parts.len() <= 2
-                && parts.iter().all(|part| !part.is_empty())
-                && !each.contains(['{', '}'])
-        });
-        let message =
-            format!("api.omit '{pattern}' must be a key or parent.key, with {{a,b}} for either");
-        ensure(named, message)?;
+fn tcp_port(port: u16, at: &str) -> Result<(), ManifestError> {
+    if port == 0 {
+        return Err(error(at, "0 is not a TCP port; use 1 to 65535"));
     }
     Ok(())
 }
 
-impl Api {
-    /// The `omit` patterns, each `{a,b}` written out as its alternatives.
-    pub fn omitted(&self) -> Vec<String> {
-        self.omit.iter().flat_map(|pattern| braced(pattern)).collect()
+fn loopback_http(url: &str, at: &str) -> Result<(), ManifestError> {
+    let parsed = Url::parse(url).ok();
+    if parsed.is_some_and(|url| url.scheme() == "http" && url.host_str() == Some("127.0.0.1")) {
+        return Ok(());
     }
+    let message = format!(
+        "'{url}' must be an http:// URL on 127.0.0.1, such as http://127.0.0.1:3000/healthz"
+    );
+    Err(error(at, message))
 }
 
-fn braced(pattern: &str) -> Vec<String> {
-    let Some((head, rest)) = pattern.split_once('{') else { return vec![pattern.to_string()] };
-    let Some((alternatives, tail)) = rest.split_once('}') else {
-        return vec![pattern.to_string()];
-    };
-    let tails = braced(tail);
-    alternatives
-        .split(',')
-        .flat_map(|alternative| tails.iter().map(move |tail| format!("{head}{alternative}{tail}")))
-        .collect()
+fn command(argv: &[String], at: &str) -> Result<(), ManifestError> {
+    if argv.first().is_some_and(|program| !program.is_empty()) {
+        return Ok(());
+    }
+    Err(error(at, "list the program, then its arguments, such as [node, server.js]"))
 }
 
-fn validate_database(database: &Database) -> Result<(), String> {
-    let url = Url::parse(&database.url).map_err(|e| format!("database.url is not a URL: {e}"))?;
-    let scheme_ok = matches!(url.scheme(), "postgres" | "postgresql" | "mysql");
-    ensure(scheme_ok, "database.url must start with postgres://, postgresql:// or mysql://")?;
-    ensure(url.path().len() > 1, "database.url must name a database")?;
-    if let Some(schemas) = &database.schemas {
-        ensure(!schemas.is_empty(), "database.schemas must not be empty when set")?;
-    }
-    for entry in &database.ignore {
-        ensure(!entry.is_empty(), "database.ignore entries must not be empty")?;
-    }
-    for entry in &database.time.exclude {
-        ensure(
-            entry.contains('.'),
-            format!("database.time.exclude entry '{entry}' must be table.column"),
-        )?;
-    }
-    for pattern in database.time.epoch.keys() {
-        let parts = pattern.rsplit_once('.');
-        let ok = parts.is_some_and(|(table, column)| !table.is_empty() && !column.is_empty());
-        ensure(ok, format!("database.time.epoch key '{pattern}' must be table.column"))?;
+fn commands(list: &[Vec<String>], key: &str) -> Result<(), ManifestError> {
+    for (i, argv) in list.iter().enumerate() {
+        command(argv, &format!("{key}[{i}]"))?;
     }
     Ok(())
 }
 
-fn server(url: &Url) -> (String, u16) {
-    let host = match url.host_str().unwrap_or_default() {
-        "localhost" | "127.0.0.1" | "[::1]" => "loopback",
-        other => other,
-    };
-    let default = if url.scheme() == "mysql" { 3306 } else { 5432 };
-    (host.to_string(), url.port().unwrap_or(default))
-}
-
-fn validate_sinks(sinks: &Sinks) -> Result<(), String> {
-    if let (Some(smtp), Some(http)) = (sinks.smtp, sinks.http) {
-        ensure(smtp != http, "sinks.smtp and sinks.http must use different ports")?;
-    }
-    for (key, response) in &sinks.responses {
-        let path = match key.split_once(' ') {
-            Some((method, path)) => {
-                let method_ok =
-                    !method.is_empty() && method.chars().all(|c| c.is_ascii_uppercase());
-                ensure(method_ok, format!("sinks.responses key '{key}' has a bad method"))?;
-                path
-            }
-            None => key.as_str(),
-        };
-        ensure(path.starts_with('/'), format!("sinks.responses key '{key}' must have a /path"))?;
-        let star_ok = !path.trim_end_matches('*').contains('*');
-        ensure(star_ok, format!("sinks.responses key '{key}': '*' only at the end"))?;
-        ensure(
-            (100..=599).contains(&response.status),
-            format!("sinks.responses '{key}': bad status"),
-        )?;
-        let one_body = response.json.is_none() || response.body.is_none();
-        ensure(one_body, format!("sinks.responses '{key}' sets both json and body"))?;
+/// Names the OS accepts: not empty, and without '=' or NUL.
+fn env_names(env: &BTreeMap<String, String>, at: &str) -> Result<(), ManifestError> {
+    for name in env.keys() {
+        if name.is_empty() || name.contains(['=', '\0']) {
+            let message = format!("{name:?} is not a variable name; drop its '=' or NUL");
+            return Err(error(at, message));
+        }
     }
     Ok(())
 }
 
-/// 1 to 64 lowercase letters, digits, `_` or `-`.
-pub(crate) fn is_short_name(name: &str) -> bool {
-    (1..=64).contains(&name.len())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-'))
-}
-
-fn loopback_http(url: &str, key: &str) -> Result<(), String> {
-    let url = Url::parse(url).map_err(|e| format!("{key} is not a URL: {e}"))?;
-    ensure(url.scheme() == "http", format!("{key} must be plain http://"))?;
-    let host = url.host_str().unwrap_or_default();
-    let loopback = matches!(host, "127.0.0.1" | "localhost" | "[::1]");
-    ensure(loopback, format!("{key} must be on the loopback interface"))
-}
-
-fn ensure_env_names<'a>(names: impl Iterator<Item = &'a String>) -> Result<(), String> {
-    for name in names {
-        let ok = !name.is_empty() && !name.contains(['=', '\0']);
-        ensure(ok, format!("'{name}' is not a valid environment variable name"))?;
+/// `table.column`, its last dot splitting the two, both non-empty.
+fn table_column(entry: &str, at: &str) -> Result<(), ManifestError> {
+    match entry.rsplit_once('.') {
+        Some((table, column)) if !table.is_empty() && !column.is_empty() => Ok(()),
+        Some(_) | None => {
+            let message = format!("'{entry}' must be table.column, such as contacts.birthday");
+            Err(error(at, message))
+        }
     }
-    Ok(())
 }
 
-/// The sandbox variable that holds an app's API URL, such as `API_WEST_OPS`.
-pub fn api_variable(app: &str) -> String {
-    format!("API_{}", app.to_ascii_uppercase().replace('-', "_"))
+/// Parse and validate a manifest; `file` names the root in errors.
+fn parse(text: &str, file: &str) -> Result<Manifest, ManifestError> {
+    let mut options = serde_saphyr::Options::default();
+    options.with_snippet = false;
+    options.strict_booleans = true;
+    let root: Value = serde_saphyr::from_str_with_options(text, options).map_err(|e| {
+        let message = e.render_with_formatter(&serde_saphyr::UserMessageFormatter);
+        error(file, format!("not valid YAML: {}", message.lines().next().unwrap_or_default()))
+    })?;
+    let manifest: Manifest = serde_path_to_error::deserialize(root).map_err(|e| {
+        let path = e.path().to_string();
+        let field = if path == "." { file.to_string() } else { path };
+        let message = e.inner().to_string();
+        let message = message
+            .replace("expected u16", "expected a TCP port, 1 to 65535")
+            .replace("expected map with a single key", "expected {tcp: PORT} or {http: URL}");
+        error(field, message)
+    })?;
+    manifest.validate()?;
+    Ok(manifest)
 }
 
-fn is_world_name(s: &str) -> bool {
-    let allowed = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
-    s.chars().next().is_some_and(allowed) && s.chars().all(|c| allowed(c) || matches!(c, '_' | '-'))
-}
-
-fn is_slug(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-}
-
-pub(crate) fn ensure(condition: bool, message: impl Into<String>) -> Result<(), String> {
-    if condition { Ok(()) } else { Err(message.into()) }
-}
-
-/// 64-bit FNV-1a as 16 hex digits; Python's `miroir.derive.content_hash` matches it.
-pub fn content_hash(bytes: &[u8]) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in bytes {
-        hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3);
-    }
-    format!("{hash:016x}")
-}
-
-/// Read and parse a YAML file.
-pub(crate) fn parse_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, ManifestError> {
-    let text = std::fs::read_to_string(path).map_err(|e| error(path, e.to_string()))?;
-    serde_saphyr::from_str(&text).map_err(|e| error(path, e.to_string()))
-}
-
-pub(crate) fn error(path: &Path, message: impl Into<String>) -> ManifestError {
-    ManifestError { file: path.display().to_string(), message: message.into() }
+fn error(field: impl Into<String>, message: impl Into<String>) -> ManifestError {
+    ManifestError { field: field.into(), message: message.into() }
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
 
-    pub(crate) const MANIFEST: &str = r#"
-miroir: 1
-name: acme-crm
-description: Acme CRM
+    /// Every key, briefly.
+    const MANIFEST: &str = r#"
+expose: [3000]
 processes:
   - {name: db, command: [postgres], user: postgres, datastore: true, ready: {tcp: 5432}}
   - name: web
     command: [node, server.js]
     cwd: /app
+    env: {HOST: 0.0.0.0}
     ready: {http: "http://127.0.0.1:3000/healthz"}
-state: [/var/lib/postgresql/data, /app/uploads]
-apps:
-  crm:
-    database: {url: "postgres://postgres@127.0.0.1:5432/crm"}
-    api: {base_url: "http://127.0.0.1:3000"}
-personas:
-  manager: {description: Dana, headers: {crm: {Authorization: Bearer x}}}
+env: {DATABASE_URL: "postgres://postgres@127.0.0.1:5432/crm"}
+bake: [[createdb, crm]]
+seed: [[node, seed.js]]
+database:
+  url: postgres://postgres@127.0.0.1:5432/crm
+  ignore: [api_tokens.last_used_at]
+  time: {exclude: [contacts.birthday], epoch: {deals.synced_unix: s}}
 sinks: {smtp: 2525, http: 9000, responses: {"POST /v1/x": {json: {}}, "/hooks/*": {status: 204}}}
+quiet: [sh, -c, "true"]
 "#;
 
-    pub(crate) fn manifest(yaml: &str) -> Result<Manifest, String> {
-        let manifest: Manifest = serde_saphyr::from_str(yaml).map_err(|e| e.to_string())?;
-        manifest.validate()?;
-        Ok(manifest)
+    /// The fixture's manifest, `fixtures/acme-crm/miroir.yaml`.
+    const ACME_CRM: &str = r#"
+# Acme CRM as a Miroir world: how to run it, bake its world, and what the agent may reach.
+expose: [3000]
+processes:
+  - {name: db, command: [postgres, -D, /var/lib/postgresql/data, -c, listen_addresses=127.0.0.1],
+     user: postgres, datastore: true, ready: {tcp: 5432}}
+  - {name: cache, command: [redis-server, --dir, /var/lib/redis, --bind, 127.0.0.1],
+     user: redis, datastore: true, ready: {tcp: 6379}}
+  - name: web
+    command: [node, dist/server.js]
+    user: node
+    cwd: /app
+    env: {DATABASE_URL: "postgres://crm_app@127.0.0.1:5432/crm", HOST: 0.0.0.0}
+    ready: {http: "http://127.0.0.1:3000/healthz"}
+  - {name: worker, command: [node, dist/worker.js], user: node, cwd: /app,
+     env: {DATABASE_URL: "postgres://crm_app@127.0.0.1:5432/crm"}}
+env:
+  DATABASE_URL: postgres://postgres@127.0.0.1:5432/crm
+  REDIS_URL: redis://127.0.0.1:6379
+  SMTP_URL: smtp://127.0.0.1:2525
+  STRIPE_API_BASE: http://127.0.0.1:9000/stripe
+  SCHEDULER_ENABLED: "false"
+bake:
+  - [createdb, -h, 127.0.0.1, -U, postgres, crm]
+  - [node, dist/migrate.js]
+  - [node, dist/seed.js]
+  - [psql, -h, 127.0.0.1, -U, postgres, -d, crm, -v, ON_ERROR_STOP=1, -c,
+     "CREATE ROLE crm_app LOGIN; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public
+      TO crm_app; GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO crm_app"]
+seed:
+  - [node, -e, "fetch('http://127.0.0.1:3000/deals/1100/notes', {method: 'POST',
+     headers: {authorization: 'Bearer seed-token-dana', 'content-type': 'application/json'},
+     body: JSON.stringify({text: 'Seeded through the API'})}).then((r) =>
+     process.exit(r.ok ? 0 : 1))"]
+database:
+  url: postgres://postgres@127.0.0.1:5432/crm
+  ignore: [api_tokens.last_used_at]
+  time:
+    exclude: [contacts.birthday]
+    epoch: {deals.synced_unix: s}
+sinks:
+  smtp: 2525
+  http: 9000
+  responses:
+    "POST /stripe/v1/payment_intents": {status: 200, json: {id: pi_test, object: payment_intent,
+      status: succeeded}}
+# Reads REDIS_URL from `env`, so the pipeline tests catch a collect that drops the manifest env.
+quiet: [sh, -c, 'test "$(redis-cli -u "$REDIS_URL" llen bull:email:wait)$(redis-cli -u
+  "$REDIS_URL" llen bull:email:active)" = 00']
+"#;
+
+    /// The Gitea example's manifest, `examples/gitea/miroir.yaml`.
+    const GITEA: &str = r#"
+expose: [3000]
+processes:
+  - name: db
+    command: [postgres, -D, /var/lib/postgresql/data, -c, listen_addresses=127.0.0.1,
+              -c, unix_socket_directories=, -c, fsync=off, -c, synchronous_commit=off,
+              -c, full_page_writes=off]
+    user: postgres
+    datastore: true
+    ready: {tcp: 5432}
+  - name: gitea
+    command: [gitea, web, --config, /etc/gitea/app.ini]
+    user: git
+    cwd: /var/lib/gitea
+    ready: {http: "http://127.0.0.1:3000/api/healthz"}
+env:
+  GITEA_WORK_DIR: /var/lib/gitea
+  GITEA_CUSTOM: /var/lib/gitea/custom
+bake:
+  - [python3, /opt/gitea-env/seed.py, configure]
+  - [psql, -h, 127.0.0.1, -U, postgres, -v, ON_ERROR_STOP=1,
+     -c, CREATE ROLE gitea LOGIN, -c, CREATE DATABASE gitea OWNER gitea]
+  - [su-exec, git, gitea, migrate, --config, /etc/gitea/app.ini]
+  - [su-exec, git, gitea, admin, user, create, --config, /etc/gitea/app.ini, --admin,
+     --username, env-admin, --email, admin@env.test, --random-password,
+     --must-change-password=false]
+seed:
+  - [python3, /opt/gitea-env/seed.py]
+database:
+  url: postgres://postgres@127.0.0.1:5432/gitea
+  ignore: [action, notification, issue_user, hook_task, webhook.last_status,
+           webhook.updated_unix, language_stat, repo_indexer_status,
+           access_token.updated_unix]
+  time:
+    epoch: {"*.*_unix": s}
+sinks:
+  smtp: 2525
+  http: 9000
+quiet: [su-exec, git, gitea, manager, flush-queues, --config, /etc/gitea/app.ini]
+"#;
+
+    fn parsed(yaml: &str) -> Result<Manifest, ManifestError> {
+        parse(yaml, "miroir.yaml")
     }
 
-    fn manifest_err(from: &str, to: &str) -> String {
-        assert!(MANIFEST.contains(from), "test patch does not apply: {from}");
-        manifest(&MANIFEST.replacen(from, to, 1)).expect_err("manifest should be rejected")
+    /// The error of `MANIFEST` with its first `from` replaced by `to`.
+    fn refused(from: &str, to: &str) -> ManifestError {
+        assert!(MANIFEST.contains(from), "the patch does not apply: {from}");
+        parsed(&MANIFEST.replacen(from, to, 1)).expect_err(to)
     }
 
-    fn with_db_time(time: &str) -> String {
-        let from = "5432/crm\"}";
-        assert!(MANIFEST.contains(from), "test patch does not apply: {from}");
-        MANIFEST.replacen(from, &format!("5432/crm\", time: {time}}}"), 1)
-    }
-
-    #[test]
-    fn worlds_are_names_a_path_can_hold() {
-        let worlds = |list: &str| manifest(&format!("{MANIFEST}worlds: {list}\n"));
-        assert_eq!(worlds("[north, south-2, a_b, 9lives]").unwrap().worlds.len(), 4);
-        let refused = [
-            ("[]", "at least one world"),
-            ("[North]", "lowercase letters"),
-            ("['..']", "lowercase letters"),
-            ("[a.b]", "lowercase letters"),
-            ("[a/b]", "lowercase letters"),
-            ("[-a]", "starting with a letter or digit"),
-            ("['']", "lowercase letters"),
-            ("[a, a]", "listed twice"),
-        ];
-        for (list, expected) in refused {
-            let err = worlds(list).unwrap_err();
-            assert!(err.contains(expected), "{list}: expected '{expected}', got '{err}'");
+    /// Each case: what to replace, with what, the field the error names, and a part of its
+    /// message.
+    fn assert_refusals(cases: &[(&str, &str, &str, &str)]) {
+        for (from, to, field, message) in cases {
+            let error = refused(from, to);
+            assert_eq!(error.field, *field, "{to}: {error}");
+            assert!(error.message.contains(message), "{to}: expected '{message}' in '{error}'");
         }
     }
 
     #[test]
-    fn epoch_columns_name_their_unit() {
-        let m = manifest(&with_db_time("{epoch: {\"*.*_unix\": s, post.createat: ms}}")).unwrap();
-        let time = &m.apps["crm"].database.as_ref().unwrap().time;
-        let units: Vec<i64> = time.epoch.values().map(|u| u.per_second()).collect();
-        assert_eq!(units, [1, 1000]);
+    fn a_manifest_reads_every_key() {
+        let manifest = parsed(MANIFEST).unwrap();
+        assert_eq!(manifest.expose, [3000]);
+        let db = &manifest.processes[0];
+        assert_eq!(db.user.as_deref(), Some("postgres"));
+        assert!(db.datastore);
+        assert_eq!(db.cwd, None);
+        assert_eq!(db.ready, Some(Ready::Tcp(5432)));
+        let web = &manifest.processes[1];
+        assert_eq!(web.user, None, "a process without a user runs as root");
+        assert!(!web.datastore);
+        assert_eq!(web.cwd, Some(PathBuf::from("/app")));
+        assert_eq!(web.env["HOST"], "0.0.0.0");
+        assert_eq!(web.ready, Some(Ready::Http("http://127.0.0.1:3000/healthz".into())));
+        assert_eq!(manifest.env["DATABASE_URL"], "postgres://postgres@127.0.0.1:5432/crm");
+        assert_eq!(manifest.bake, [["createdb", "crm"]]);
+        assert_eq!(manifest.seed, [["node", "seed.js"]]);
+        let time = &manifest.database.time;
+        assert_eq!(time.exclude, ["contacts.birthday"]);
+        assert_eq!(time.epoch["deals.synced_unix"], EpochUnit::S);
+        assert_eq!(time.captured, None);
+        let sinks = manifest.sinks.as_ref().unwrap();
+        assert_eq!((sinks.smtp, sinks.http), (Some(2525), Some(9000)));
+        let canned = &sinks.responses["POST /v1/x"];
+        assert_eq!(canned.status, 200, "the status defaults to 200");
+        assert_eq!(canned.json, Some(serde_json::json!({})));
+        assert_eq!(sinks.responses["/hooks/*"].status, 204);
+        assert_eq!(manifest.quiet, Some(vec!["sh".into(), "-c".into(), "true".into()]));
     }
 
     #[test]
-    fn apps_are_named_described_and_on_databases_of_their_own() {
-        let with_app = |app: &str| MANIFEST.replacen("apps:\n", &format!("apps:\n  {app}\n"), 1);
-        let two_apis = with_app("east: {api: {base_url: \"http://127.0.0.1:3001\"}}");
-        let err = manifest(&two_apis).unwrap_err();
-        assert!(err.contains("app 'crm': needs a description, since several"), "{err}");
-        let described = two_apis
-            .replacen("  crm:\n", "  crm:\n    description: The CRM\n", 1)
-            .replacen("{api: {base_url", "{description: East, api: {base_url", 1);
-        assert_eq!(manifest(&described).unwrap().apis().count(), 2, "an api-only app is fine");
-        let clash = MANIFEST.replacen(
-            "apps:\n",
-            "apps:\n  west-ops: {description: Ops, api: {base_url: \"http://127.0.0.1:3001\"}}\n  \
-             west_ops: {description: Ops, api: {base_url: \"http://127.0.0.1:3002\"}}\n",
-            1,
-        );
-        let clash = clash.replacen("  crm:\n", "  crm:\n    description: The CRM\n", 1);
-        let err = manifest(&clash).unwrap_err();
-        assert!(err.contains("'west-ops' and 'west_ops' would share"), "{err}");
-        let db_only =
-            with_app("ledger: {database: {url: \"postgres://postgres@localhost/ledger\"}}");
-        let m = manifest(&db_only).unwrap();
-        assert_eq!((m.apis().count(), m.databases().count()), (1, 2), "a database-only app too");
-        let err = manifest(&db_only.replacen("{crm: {Author", "{ledger: {Author", 1)).unwrap_err();
-        assert!(err.contains("headers for 'ledger', which is no app with an api"), "{err}");
-
-        let crm_db = "    database: {url: \"postgres://postgres@127.0.0.1:5432/crm\"}\n";
-        let refused = [
-            ("  crm:\n", "  Crm:\n", "lowercase letters"),
-            ("  crm:\n", "  crm.x:\n", "lowercase letters"),
-            ("apps:\n", "apps:\n  bare: {}\n", "app 'bare': needs an api, an mcp server or a"),
-            ("apps:\n", "apps: {}\nx:\n", "unknown field"),
-            (crm_db, "", "at least one app must have a database"),
-            ("    api: {base_url", "    unused: {base_url", "unknown field"),
-            ("{crm: {Authorization", "{ghost: {Authorization", "headers for 'ghost'"),
-            ("3000\"}\n", "3000\", omit: [a.b.c]}\n", "api.omit 'a.b.c' must be a key or"),
-            ("3000\"}\n", "3000\", omit: [.url]}\n", "api.omit '.url' must be a key or"),
-            ("3000\"}\n", "3000\", omit: ['{a,b']}\n", "api.omit '{a,b' must be a key or"),
-            ("3000\"}\n", "3000\", omit: ['{a.b,c}.d']}\n", "api.omit '{a.b,c}.d' must be"),
-        ];
-        for (from, to, expected) in refused {
-            let err = manifest_err(from, to);
-            assert!(err.contains(expected), "{to}: expected '{expected}', got '{err}'");
-        }
-        let braced = MANIFEST.replacen(
-            "3000\"}\n",
-            "3000\", omit: [html_url, '{user,assignee}.{email,created}']}\n",
-            1,
-        );
-        let parsed = manifest(&braced).unwrap();
-        assert_eq!(
-            parsed.apps["crm"].api.as_ref().unwrap().omitted(),
-            ["html_url", "user.email", "user.created", "assignee.email", "assignee.created"]
-        );
-        let no_api = MANIFEST.replacen("    api: {base_url: \"http://127.0.0.1:3000\"}\n", "", 1);
-        let err = manifest(&no_api).unwrap_err();
-        assert!(err.contains("at least one app must have an api"), "{err}");
-        let block_end = MANIFEST.find("personas:").unwrap();
-        let block_start = MANIFEST.find("apps:").unwrap();
-        let empty = format!("{}apps: {{}}\n{}", &MANIFEST[..block_start], &MANIFEST[block_end..]);
-        assert!(manifest(&empty).unwrap_err().contains("apps must name at least one app"));
-
-        let other =
-            |url: &str| manifest(&with_app(&format!("other: {{database: {{url: \"{url}\"}}}}")));
-        for url in ["postgres://postgres@127.0.0.1:5432/crm", "postgresql://app@localhost/crm"] {
-            let err = other(url).unwrap_err();
-            assert!(err.contains("name the same database; give the second only an api"), "{err}");
-        }
-        assert!(other("postgres://postgres@127.0.0.1:5433/crm").is_ok(), "another server");
-        assert!(other("postgres://postgres@127.0.0.1/ledger").is_ok(), "another database");
-        let mysql = with_app("books: {database: {url: \"mysql://root@localhost:3306/books\"}}")
-            .replacen("postgres://postgres@127.0.0.1:5432/crm", "mysql://root@127.0.0.1/shop", 1);
-        let err = manifest(&mysql).unwrap_err();
-        assert!(err.contains("apps 'books' and 'crm' have MySQL databases on one server"), "{err}");
-    }
-
-    #[test]
-    fn one_app_may_name_an_mcp_server_on_loopback() {
-        let crm_api = "    api: {base_url: \"http://127.0.0.1:3000\"}\n";
-        let mcp = |url: &str| format!("{crm_api}    mcp: {{url: \"{url}\"}}\n");
-        let with_mcp = MANIFEST.replacen(crm_api, &mcp("http://127.0.0.1:8080/mcp"), 1);
-        let m = manifest(&with_mcp).unwrap();
-        assert_eq!(
-            m.mcp().map(|(name, mcp)| (name, mcp.url.as_str())),
-            Some(("crm", "http://127.0.0.1:8080/mcp"))
-        );
-        assert!(manifest(MANIFEST).unwrap().mcp().is_none());
-
-        let ops = "apps:\n  ops: {mcp: {url: \"http://127.0.0.1:8081/mcp\"}}\n";
-        let mcp_only = MANIFEST.replacen("apps:\n", ops, 1);
-        let m = manifest(&mcp_only.replacen("{crm: {Author", "{ops: {Author", 1)).unwrap();
-        assert_eq!(m.mcp().map(|(name, _)| name), Some("ops"), "an mcp-only app takes headers");
-
-        let refused = [
-            (mcp("https://127.0.0.1:8080/mcp"), "mcp.url must be plain http://"),
-            (mcp("http://gitea.example:8080/mcp"), "mcp.url must be on the loopback interface"),
-            (mcp("not a url"), "mcp.url is not a URL"),
-            (format!("{crm_api}    mcp: {{url: x, token: y}}\n"), "unknown field"),
-        ];
-        for (to, expected) in refused {
-            let err = manifest(&MANIFEST.replacen(crm_api, &to, 1)).unwrap_err();
-            assert!(err.contains(expected), "{to}: expected '{expected}', got '{err}'");
-        }
-        let err = manifest(&with_mcp.replacen("apps:\n", ops, 1)).unwrap_err();
-        assert!(err.contains("only one app may name an mcp server"), "{err}");
-    }
-
-    #[test]
-    fn a_system_prompt_is_text() {
-        let with = |prompt: &str| {
-            MANIFEST.replacen(
-                "description: Acme CRM\n",
-                &format!("description: Acme CRM\nsystem_prompt: {prompt}\n"),
-                1,
-            )
+    fn datastores_and_apps_keep_manifest_order() {
+        let manifest = parsed(ACME_CRM).unwrap();
+        let names = |processes: Vec<&Process>| -> Vec<String> {
+            processes.into_iter().map(|process| process.name.clone()).collect()
         };
-        let m = manifest(&with("Work only through the tools.")).unwrap();
-        assert_eq!(m.system_prompt.as_deref(), Some("Work only through the tools."));
-        assert!(manifest(MANIFEST).unwrap().system_prompt.is_none());
-        let err = manifest(&with("\" \"")).unwrap_err();
-        assert!(err.contains("system_prompt must not be empty"), "{err}");
+        assert_eq!(names(manifest.datastores()), ["db", "cache"]);
+        assert_eq!(names(manifest.apps()), ["web", "worker"]);
     }
 
     #[test]
-    fn state_left_out_needs_every_process_to_run_as_a_user() {
-        let derived = MANIFEST.replacen("state: [/var/lib/postgresql/data, /app/uploads]\n", "", 1);
-        let err = manifest(&derived).unwrap_err();
-        assert!(err.contains("process 'web' runs as root"), "{err}");
-        let as_root = derived.replacen("cwd: /app", "cwd: /app\n    user: root", 1);
-        assert!(manifest(&as_root).unwrap_err().contains("runs as root"));
-        let as_node = derived.replacen("cwd: /app", "cwd: /app\n    user: node", 1);
-        assert!(manifest(&as_node).unwrap().state.is_none());
+    fn the_acme_crm_and_gitea_manifests_load() {
+        let acme = parsed(ACME_CRM).unwrap();
+        assert_eq!(acme.processes.len(), 4);
+        assert_eq!(acme.env["SCHEDULER_ENABLED"], "false");
+        let quiet = concat!(
+            r#"test "$(redis-cli -u "$REDIS_URL" llen bull:email:wait)"#,
+            r#"$(redis-cli -u "$REDIS_URL" llen bull:email:active)" = 00"#,
+        );
+        assert_eq!(acme.quiet, Some(vec!["sh".into(), "-c".into(), quiet.into()]));
+        let grant = &acme.bake[3][10];
+        assert!(grant.contains("IN SCHEMA public TO crm_app; GRANT USAGE ON ALL"), "{grant}");
+        let stripe = &acme.sinks.as_ref().unwrap().responses["POST /stripe/v1/payment_intents"];
+        assert_eq!(stripe.json.as_ref().unwrap()["id"], "pi_test");
+        let gitea = parsed(GITEA).unwrap();
+        assert_eq!(gitea.database.ignore.len(), 9);
+        assert_eq!(gitea.database.time.epoch["*.*_unix"], EpochUnit::S);
+        assert_eq!(gitea.bake[0], ["python3", "/opt/gitea-env/seed.py", "configure"]);
+        assert!(gitea.sinks.as_ref().unwrap().responses.is_empty());
     }
 
     #[test]
-    fn manifest_rejects_nested_state() {
-        let err = manifest_err("/app/uploads]", "/var/lib/postgresql/data/pg_wal]");
-        assert!(err.contains("must not nest"), "{err}");
+    fn load_reads_a_file_and_names_one_it_cannot_read() {
+        let name = format!("miroir-manifest-{}.yaml", std::process::id());
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, MANIFEST).unwrap();
+        assert_eq!(Manifest::load(&path).unwrap().processes.len(), 2);
+        std::fs::remove_file(&path).unwrap();
+        let error = Manifest::load(&path).unwrap_err();
+        assert_eq!(error.field, path.display().to_string());
+        assert!(error.message.starts_with("cannot read the manifest: "), "{error}");
+        assert!(error.message.contains("COPY miroir.yaml /miroir/miroir.yaml"), "{error}");
+        let as_root = "and runs miroir as root, with USER root as its last USER";
+        assert!(error.message.ends_with(as_root), "{error}");
     }
 
     #[test]
-    fn manifest_rules() {
-        let cases = [
-            ("miroir: 1", "miroir: 2", "miroir must be 1"),
-            ("name: acme-crm", "name: acme crm", "name must be"),
+    fn unknown_keys_are_refused_with_their_path() {
+        assert_refusals(&[
+            ("expose:", "surprise: 1\nexpose:", "surprise", "unknown field `surprise`"),
+            ("    cwd: /app", "    cwd: /app\n    surprise: 1", "processes[1].surprise", "unknown"),
+            ("time: {", "time: {anchor: bake, ", "database.time.anchor", "unknown field"),
+            ("sinks: {", "sinks: {mcp: 1, ", "sinks.mcp", "unknown field `mcp`"),
+            ("{json: {}}", "{json: {}, delay: 1}", "sinks.responses.POST /v1/x.delay", "unknown"),
+            ("ignore:", "schemas: [public]\n  ignore:", "database.schemas", "unknown field"),
+        ]);
+    }
+
+    #[test]
+    fn values_of_the_wrong_shape_are_refused_with_their_path() {
+        assert_refusals(&[
+            ("{tcp: 5432}", "{tcp: 5432, timeout_s: 60}", "processes[0].ready", "{tcp: PORT} or"),
+            ("{tcp: 5432}", "{udp: 5432}", "processes[0].ready", "unknown variant `udp`"),
+            ("{tcp: 5432}", "{tcp: db}", "processes[0].ready.tcp", "invalid type: string"),
+            ("datastore: true", "datastore: yes", "processes[0].datastore", "invalid type"),
+            ("{HOST: 0.0.0.0}", "{PORT: 3000}", "processes[1].env.PORT", "expected a string"),
+            ("quiet: [sh, -c, \"true\"]", "quiet: {command: [x]}", "quiet", "invalid type: map"),
+            ("bake: [[createdb, crm]]", "bake: [createdb, crm]", "bake[0]", "invalid type"),
+        ]);
+    }
+
+    #[test]
+    fn a_missing_key_or_bad_yaml_names_the_file() {
+        let error = parsed(&MANIFEST.replacen("expose: [3000]\n", "", 1)).unwrap_err();
+        assert_eq!(error.field, "miroir.yaml");
+        assert_eq!(error.message, "missing field `expose`");
+        let error = parsed("expose: [3000\nprocesses: [").unwrap_err();
+        assert_eq!(error.field, "miroir.yaml");
+        assert!(error.message.starts_with("not valid YAML: "), "{error}");
+        let error = parsed("").unwrap_err();
+        assert_eq!(error.field, "miroir.yaml", "{error}");
+    }
+
+    #[test]
+    fn processes_need_a_datastore_first_and_unique_names() {
+        assert_refusals(&[
+            ("datastore: true", "datastore: false", "processes", "no process is a datastore"),
             (
-                "ready: {tcp: 5432}",
-                "ready: {tcp: 5432, http: \"http://x\"}",
-                "exactly one of tcp or http",
+                "processes:\n",
+                "processes:\n  - {name: early, command: [x]}\n",
+                "processes[1].datastore",
+                "datastore 'db' comes after the app 'early'; list every datastore before",
+            ),
+            ("name: web", "name: db", "processes[1].name", "already the name of processes[0]"),
+            ("name: web", "name: Web", "processes[1].name", "lower-case letters, digits and '-'"),
+            ("name: web", "name: web_1", "processes[1].name", "lower-case letters"),
+            ("name: web", "name: ''", "processes[1].name", "lower-case letters"),
+            ("command: [node, server.js]", "command: []", "processes[1].command", "the program"),
+            ("command: [node, server.js]", "command: ['']", "processes[1].command", "program"),
+            ("cwd: /app", "cwd: app", "processes[1].cwd", "'app' must be an absolute path"),
+        ]);
+        let second = "  - {name: db2, datastore: true, command: [x]}\n  - {name: db";
+        let two = MANIFEST.replacen("  - {name: db", second, 1);
+        assert_eq!(parsed(&two).unwrap().datastores().len(), 2, "datastores first is fine");
+    }
+
+    #[test]
+    fn ready_probes_are_on_loopback() {
+        let url = "\"http://127.0.0.1:3000/healthz\"";
+        assert_refusals(&[
+            (url, "\"http://web:3000/healthz\"", "processes[1].ready.http", "on 127.0.0.1"),
+            (url, "\"http://localhost:3000/\"", "processes[1].ready.http", "on 127.0.0.1"),
+            (url, "\"https://127.0.0.1:3000/\"", "processes[1].ready.http", "an http:// URL"),
+            (url, "\"127.0.0.1:3000\"", "processes[1].ready.http", "an http:// URL"),
+            ("{tcp: 5432}", "{tcp: 0}", "processes[0].ready.tcp", "0 is not a TCP port"),
+        ]);
+    }
+
+    #[test]
+    fn ports_are_tcp_ports() {
+        assert_refusals(&[
+            ("expose: [3000]", "expose: [0]", "expose[0]", "0 is not a TCP port; use 1 to 65535"),
+            ("expose: [3000]", "expose: [3000, 70000]", "expose[1]", "a TCP port, 1 to 65535"),
+            ("expose: [3000]", "expose: []", "expose", "list at least one port"),
+            ("smtp: 2525", "smtp: 0", "sinks.smtp", "not a TCP port"),
+            ("http: 9000", "http: 0", "sinks.http", "not a TCP port"),
+            ("http: 9000", "http: 2525", "sinks.http", "give each sink its own"),
+        ]);
+    }
+
+    #[test]
+    fn environment_names_are_valid() {
+        assert_refusals(&[
+            ("{HOST: 0.0.0.0}", "{\"A=B\": x}", "processes[1].env", "\"A=B\" is not a variable"),
+            ("{HOST: 0.0.0.0}", "{\"\": x}", "processes[1].env", "\"\" is not a variable name"),
+            ("env: {DATABASE_URL", "env: {\"X\\0Y\": x, DATABASE_URL", "env", "\"X\\0Y\" is not"),
+        ]);
+    }
+
+    #[test]
+    fn commands_and_quiet_are_argvs() {
+        assert_refusals(&[
+            ("bake: [[createdb, crm]]", "bake: [[createdb, crm], []]", "bake[1]", "the program"),
+            ("seed: [[node, seed.js]]", "seed: [[]]", "seed[0]", "the program"),
+            ("quiet: [sh, -c, \"true\"]", "quiet: []", "quiet", "the program, then its arguments"),
+        ]);
+    }
+
+    #[test]
+    fn the_database_is_a_postgres_url_with_table_and_column_entries() {
+        let url = "url: postgres://postgres@127.0.0.1:5432/crm";
+        let epoch = "{deals.synced_unix: s}";
+        assert_refusals(&[
+            (url, "url: redis://127.0.0.1/0", "database.url", "must be a postgres:// URL"),
+            (url, "url: postgres://127.0.0.1:5432", "database.url", "naming the database"),
+            (url, "url: postgres://127.0.0.1:5432/", "database.url", "naming the database"),
+            (url, "url: crm", "database.url", "postgres://"),
+            ("[api_tokens.last_used_at]", "['']", "database.ignore[0]", "a table or table.column"),
+            ("[api_tokens.last_used_at]", "[.x]", "database.ignore[0]", "table or table.column"),
+            ("[contacts.birthday]", "[birthday]", "database.time.exclude[0]", "table.column"),
+            ("[contacts.birthday]", "[contacts.]", "database.time.exclude[0]", "table.column"),
+            (epoch, "{synced_unix: s}", "database.time.epoch.synced_unix", "table.column"),
+            (
+                epoch,
+                "{deals.synced_unix: h}",
+                "database.time.epoch.deals.synced_unix",
+                "unknown variant `h`, expected `s` or `ms`",
             ),
             (
-                "ready: {tcp: 5432}",
-                "ready: {tcp: 5432, timeout_s: 0}",
-                "ready.timeout_s must be 1 to",
+                "time: {",
+                "time: {captured: last week, ",
+                "database.time.captured",
+                "'last week' is not an RFC 3339 timestamp, such as 2026-10-26T06:00:00Z: ",
             ),
-            ("command: [postgres]", "command: []", "empty command"),
-            ("name: web", "name: db", "listed twice"),
-            ("datastore: true", "datastore: false", "at least one process must be a datastore"),
-            ("cwd: /app", "cwd: app", "cwd must be absolute"),
+            ("time: {", "time: {captured: 2026-10-26, ", "database.time.captured", "RFC 3339"),
+            ("time: {", "time: {captured: 1792994400, ", "database.time.captured", "a string"),
+        ]);
+        let qualified = MANIFEST.replacen("[contacts.birthday]", "[audit.log.created_at]", 1);
+        assert!(parsed(&qualified).is_ok(), "the last dot splits a schema-qualified table");
+        let ms = MANIFEST.replacen(epoch, "{\"*.*_ms\": ms}", 1);
+        let units = parsed(&ms).unwrap().database.time.epoch;
+        assert_eq!(units["*.*_ms"].per_second(), 1000);
+        assert_eq!(EpochUnit::S.per_second(), 1);
+        let captured = MANIFEST.replacen("time: {", "time: {captured: 2026-10-26T06:00:00Z, ", 1);
+        let captured = parsed(&captured).unwrap().database.time.captured.unwrap();
+        assert_eq!(captured.as_second(), 1_792_994_400);
+    }
+
+    #[test]
+    fn canned_responses_are_well_formed() {
+        assert_refusals(&[
+            ("\"POST /v1/x\"", "\"post /v1/x\"", "sinks.responses.post /v1/x", "upper-case"),
+            ("\"POST /v1/x\"", "\" /v1/x\"", "sinks.responses. /v1/x", "upper-case method"),
+            ("\"/hooks/*\"", "\"hooks/*\"", "sinks.responses.hooks/*", "[METHOD ]/path"),
+            ("\"/hooks/*\"", "\"/ho*oks\"", "sinks.responses./ho*oks", "at the end"),
+            ("\"/hooks/*\"", "\"/hooks/**\"", "sinks.responses./hooks/**", "one optional *"),
+            ("{status: 204}", "{status: 99}", "sinks.responses./hooks/*.status", "100 to 599"),
+            ("{status: 204}", "{status: 600}", "sinks.responses./hooks/*.status", "HTTP status"),
+            ("{json: {}}", "{json: {}, body: x}", "sinks.responses.POST /v1/x", "keep one"),
             (
-                "ready: {tcp: 5432}",
-                "ready: {tcp: 5432, timeout_s: 18446744073709551615}",
-                "ready.timeout_s must be 1 to",
+                "{status: 204}",
+                "{headers: {\"bad name\": x}}",
+                "sinks.responses./hooks/*.headers",
+                "'bad name: x' is not a valid HTTP header",
             ),
-            (
-                "state: [/var/lib/postgresql/data, /app/uploads]",
-                "state: [var/lib]",
-                "must be absolute",
-            ),
-            ("state: [/var/lib/postgresql/data, /app/uploads]", "state: [/]", "is not allowed"),
-            (
-                "state: [/var/lib/postgresql/data, /app/uploads]",
-                "state: [/a/../b]",
-                "is not allowed",
-            ),
-            (
-                "state: [/var/lib/postgresql/data, /app/uploads]",
-                "state: [/miroir/x]",
-                "inside /miroir",
-            ),
-            (
-                "state: [/var/lib/postgresql/data, /app/uploads]",
-                "state: []",
-                "at least one directory",
-            ),
-            ("postgres://postgres@127.0.0.1:5432/crm", "redis://x/0", "must start with"),
-            (
-                "postgres://postgres@127.0.0.1:5432/crm",
-                "postgres://127.0.0.1:5432",
-                "name a database",
-            ),
-            ("http://127.0.0.1:3000\"}", "https://127.0.0.1:3000\"}", "plain http"),
-            ("http://127.0.0.1:3000\"}", "http://example.com\"}", "loopback"),
-            (
-                "personas:\n  manager: {description: Dana, \
-                 headers: {crm: {Authorization: Bearer x}}}",
-                "personas: {}",
-                "at least one persona",
-            ),
-            ("http: 9000", "http: 2525", "different ports"),
-            ("\"POST /v1/x\"", "\"post /v1/x\"", "bad method"),
-            ("\"/hooks/*\"", "\"hooks/*\"", "must have a /path"),
-            ("\"/hooks/*\"", "\"/ho*oks\"", "only at the end"),
-            ("{status: 204}", "{status: 99}", "bad status"),
-            ("{json: {}}", "{json: {}, body: x}", "both json and body"),
-            ("description: Acme CRM", "description: Acme CRM\nsurprise: 1", "unknown field"),
-            ("command: [postgres]", "command: [postgres], env: {'A=B': x}", "not a valid"),
-            ("command: [postgres]", "command: [postgres], env: {'': x}", "not a valid"),
-            (
-                "database: {url:",
-                "database: {schemas: [], url:",
-                "database.schemas must not be empty",
-            ),
-            (
-                "database: {url:",
-                "database: {ignore: [''], url:",
-                "database.ignore entries must not be empty",
-            ),
-            ("personas:", "bake: [[]]\npersonas:", "bake commands must not be empty"),
-            ("personas:", "seed: [[]]\npersonas:", "seed commands must not be empty"),
-        ];
-        for (from, to, expected) in cases {
-            let err = manifest_err(from, to);
-            assert!(err.contains(expected), "{to}: expected '{expected}', got '{err}'");
-        }
-        let anchor = manifest(&format!("{MANIFEST}time: {{anchor: yesterday}}\n")).unwrap_err();
-        assert!(anchor.contains("time.anchor"), "{anchor}");
-        let fixed =
-            manifest(&format!("{MANIFEST}time: {{anchor: \"2026-01-01T00:00:00Z\"}}\n")).unwrap();
-        assert_eq!(fixed.anchor().unwrap().as_second(), 1_767_225_600);
-        let exclude = manifest(&with_db_time("{exclude: [birthday]}")).unwrap_err();
-        assert!(exclude.contains("app 'crm': database.time.exclude"), "{exclude}");
-        let moved = manifest(&format!("{MANIFEST}time: {{exclude: [contacts.birthday]}}\n"));
-        assert!(moved.unwrap_err().contains("unknown field"), "exclude moved to each database");
-        let quiet = manifest(&format!("{MANIFEST}quiet: {{command: []}}\n")).unwrap_err();
-        assert!(quiet.contains("quiet.command"), "{quiet}");
-        let quiet =
-            manifest(&format!("{MANIFEST}quiet: {{command: [x], timeout_s: 0}}\n")).unwrap_err();
-        assert!(quiet.contains("quiet.timeout_s"), "{quiet}");
-        let hook = manifest(&format!("{MANIFEST}time: {{hook: []}}\n")).unwrap_err();
-        assert!(hook.contains("time.hook"), "{hook}");
-        let time = |yaml: &str| manifest(&format!("{MANIFEST}time: {yaml}\n"));
-        let captured = time("{captured: {default: 2026-10-26T06:00:00Z}}").unwrap();
-        assert_eq!(captured.time.captured["default"].as_second(), 1_792_994_400);
-        let unknown = time("{captured: {elsewhere: 2026-10-26T06:00:00Z}}").unwrap_err();
-        assert!(unknown.contains("world 'elsewhere', which worlds doesn't list"), "{unknown}");
-        let hooked = time("{hook: [x], captured: {default: 2026-10-26T06:00:00Z}}").unwrap_err();
-        assert!(hooked.contains("time.captured can't go with time.hook"), "{hooked}");
-        let vague = time("{captured: {default: last week}}").unwrap_err();
-        assert!(vague.contains("captured"), "{vague}");
-        assert!(manifest(MANIFEST).unwrap().time.captured.is_empty());
-        for key in ["created_unix", ".created_unix", "issue."] {
-            let epoch = manifest(&with_db_time(&format!("{{epoch: {{\"{key}\": s}}}}")));
-            assert!(epoch.unwrap_err().contains("must be table.column"), "{key}");
-        }
-        let unit = manifest(&with_db_time("{epoch: {issue.created_unix: h}}"));
-        assert!(unit.unwrap_err().contains('h'), "only s and ms");
-        let early_app =
-            MANIFEST.replacen("processes:\n", "processes:\n  - {name: a, command: [x]}\n", 1);
-        assert!(manifest(&early_app).unwrap_err().contains("datastores come first"));
+        ]);
+        let headers = MANIFEST.replacen("{status: 204}", "{headers: {X-Hook: \"1\"}, body: ok}", 1);
+        let manifest = parsed(&headers).unwrap();
+        let canned = &manifest.sinks.as_ref().unwrap().responses["/hooks/*"];
+        assert_eq!(canned.headers["X-Hook"], "1");
+        assert_eq!(canned.body.as_deref(), Some("ok"));
     }
 }

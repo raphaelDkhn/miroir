@@ -1,0 +1,11 @@
+# Grader self-test: the reference solution, doing nothing, and probes 1-2 of every task.
+#   harbor run -c fixtures/acme-crm/check.yaml
+#   miroir check --tasks fixtures/acme-crm/tasks jobs/<job>
+n_concurrent_trials: 4
+datasets:
+  - path: fixtures/acme-crm/tasks
+agents:
+  - name: oracle
+  - name: nop
+  - {name: oracle, env: {SOLUTION: "1"}}
+  - {name: oracle, env: {SOLUTION: "2"}}

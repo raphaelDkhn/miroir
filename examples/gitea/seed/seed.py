@@ -1,68 +1,56 @@
-"""Build a world in Gitea through Gitea's own API, then write the world's tasks.
+"""Build a world in Gitea through Gitea's own API, and record the ids Gitea gave its rows.
 
-`miroir bake` runs this as a seed command once Gitea is up, once per world, with the world's
-name in MIROIR_WORLD. It acts as each person through the admin's Sudo header, so Gitea creates
-its own rows: timeline events, counters, review requests. Then it dates every record by its
-age, reads back the ids Gitea gave the rows, and writes the world's tasks to /miroir/tasks.
+`miroir bake` runs this twice, with the world's name in WORLD (a build argument). First as
+`seed.py configure`, before Gitea starts, to name the forge and its mail sender after the
+world's company. Then as the seed, once Gitea is up: it acts as each person through the
+admin's Sudo header, so Gitea creates its own rows (timeline events, counters, review
+requests), dates every record by its age, and writes the ids Gitea gave the rows to ids.json.
+The host generator, tasks.py, reads that file back to write the world's tasks.
 
-The same world builds the same on every bake, with the same ids, which the tasks name.
+The same world builds the same on every bake. ids.json carries a digest of the world and its
+plans, so the generator can prove it planted the same world.
 """
 
 import base64
 import hashlib
 import json
 import os
-import random
-import re
+import secrets
 import subprocess
-import textwrap
+import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
 
-import families
+import plants
 import worlds
-import yaml
 from worlds import Issue, Pull, World
 
 GITEA = "http://127.0.0.1:3000"
-SPEC = Path("/opt/gitea-env/openapi.json")
-TASKS = Path("/miroir/tasks")
+APP_INI = Path("/etc/gitea/app.ini")
+IDS = Path("/opt/gitea-env/ids.json")
 PSQL = ["psql", "-h", "127.0.0.1", "-U", "postgres", "-d", "gitea", "-v", "ON_ERROR_STOP=1", "-q"]
 NOW = int(time.time())
 DAY = 86_400
 # The site admin `miroir.yaml`'s bake creates; the seed acts through it.
 ADMIN = "env-admin"
+# The admin's token: random per bake and used only by this seed, so no public code derives it.
+TOKEN = secrets.token_hex(20)
 UNITS = ["repo.code", "repo.issues", "repo.pulls", "repo.releases", "repo.wiki", "repo.projects"]
-# The order of a task file's fields.
-FIELDS = [
-    "split",
-    "world",
-    "persona",
-    "instruction",
-    "answer",
-    "max_steps",
-    "coworkers",
-    "events",
-    "checks",
-    "allowed_changes",
-    "golden",
-    "probes",
-]
 
 
-def call(world: World, method: str, path: str, body: Any = None, sudo: str | None = None) -> Any:
+def call(method: str, path: str, body: Any = None, sudo: str | None = None) -> Any:
     """Call Gitea's API as the admin, or as `sudo`."""
-    headers = {"Authorization": f"token {worlds.token(world.name, ADMIN)}"}
+    headers = {"Authorization": f"token {TOKEN}"}
     if sudo is not None:
         headers["Sudo"] = sudo
     data = None
     if body is not None:
         data = json.dumps(body).encode()
         headers["Content-Type"] = "application/json"
-    url = path if path.startswith("http") else f"{GITEA}/api/v1{path}"
+    url = f"{GITEA}/api/v1{path}"
     request = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
@@ -86,65 +74,31 @@ def rows(sql: str) -> list[list[str]]:
     return [line.split("\t") for line in done.stdout.splitlines() if line]
 
 
-def insert_tokens(world: World, logins: list[str]) -> None:
-    """Store the known tokens of `logins` as Gitea does: salted PBKDF2 hashes."""
-    statements = []
-    for login in logins:
-        token, salt = worlds.token(world.name, login), f"env{login[:7]}"
-        digest = hashlib.pbkdf2_hmac("sha256", token.encode(), salt.encode(), 10_000, 50).hex()
-        statements.append(
-            "INSERT INTO access_token (uid, name, token_hash, token_salt, token_last_eight, "
-            f"scope, created_unix, updated_unix) SELECT id, 'env', '{digest}', '{salt}', "
-            f"'{token[-8:]}', 'all', {NOW}, {NOW} FROM \"user\" WHERE lower_name = '{login}';"
-        )
-    psql("\n".join(statements))
-
-
-# The operations an engineering manager needs. Gitea's spec lists 537, more than api_docs shows;
-# this keeps issues, pull requests, releases, teams, members, hooks and files.
-KEEP_TAGS = {"issue", "organization", "repository"}
-KEEP_PATHS = {"/user", "/users/search", "/users/{username}"}
-DROP = re.compile(
-    r"/(actions|wiki|git|lfs|push_mirrors|avatar|archive|media|signing-key|activities|times"
-    r"|stopwatch|subscription|reactions|pins|assets|blocks|transfer|mirror-sync|languages"
-    r"|licenses|topics|flags|keys|editorconfig|tag_protections|projects|attachments|notes"
-    r"|statuses|compare|merge-upstream|forks|generate|stargazers|subscribers|commits"
-    r"|dependencies|issue_templates|issue_config|new_pin_allowed|pinned|contents-ext"
-    r"|file-contents|update)(/|$|\.)"
-)
-
-
-def write_spec(world: World) -> None:
-    """Keep the operations of the spec Gitea serves that the tasks' users would use."""
-    spec = call(world, "GET", f"{GITEA}/swagger.v1.json")
-    paths = {}
-    for path, item in spec["paths"].items():
-        kept = {}
-        for method, operation in item.items():
-            if method == "parameters" or operation.get("deprecated") or DROP.search(path):
-                continue
-            if KEEP_TAGS & set(operation.get("tags", [])) or path in KEEP_PATHS:
-                kept[method] = operation
-        if kept:
-            paths[path] = kept | (
-                {"parameters": item["parameters"]} if "parameters" in item else {}
-            )
-    spec["paths"] = paths
-    SPEC.write_text(json.dumps(spec), encoding="utf-8")
+def insert_token(login: str, token: str) -> None:
+    """Store a personal access token of `login` as Gitea does: a salted PBKDF2 hash."""
+    salt = f"env{login[:7]}"
+    digest = hashlib.pbkdf2_hmac("sha256", token.encode(), salt.encode(), 10_000, 50).hex()
+    stored = rows(
+        "INSERT INTO access_token (uid, name, token_hash, token_salt, token_last_eight, "
+        f"scope, created_unix, updated_unix) SELECT id, 'env', '{digest}', '{salt}', "
+        f"'{token[-8:]}', 'all', {NOW}, {NOW} FROM \"user\" WHERE lower_name = '{login}' "
+        "RETURNING uid"
+    )
+    if len(stored) != 1:
+        raise SystemExit(f"no Gitea user {login!r} to give a token: create the user first")
 
 
 def create_people(world: World) -> None:
-    """Create every person, staff and outsiders, with a password nobody uses."""
+    """Create every person, staff and outsiders, with a random password nobody knows."""
     for person in world.people.values():
         call(
-            world,
             "POST",
             "/admin/users",
             {
                 "username": person.login,
                 "full_name": person.name,
                 "email": world.email(person.login),
-                "password": hashlib.sha256(f"{world.name}:{person.login}".encode()).hexdigest(),
+                "password": secrets.token_hex(16),
                 "must_change_password": False,
                 "send_notify": False,
             },
@@ -160,7 +114,6 @@ def create_org(world: World) -> None:
     """Create the organization as its manager, then its repositories, teams and files."""
     manager = world.manager
     call(
-        world,
         "POST",
         "/orgs",
         {
@@ -173,7 +126,6 @@ def create_org(world: World) -> None:
     )
     for repo in world.repos.values():
         call(
-            world,
             "POST",
             f"/orgs/{world.org}/repos",
             {
@@ -189,7 +141,6 @@ def create_org(world: World) -> None:
     for team in world.teams.values():
         units = dict.fromkeys(UNITS, "read" if team.permission == "read" else "write")
         created = call(
-            world,
             "POST",
             f"/orgs/{world.org}/teams",
             {
@@ -201,17 +152,16 @@ def create_org(world: World) -> None:
             },
         )
         for repo in team.repos:
-            call(world, "PUT", f"/teams/{created['id']}/repos/{world.org}/{repo}")
+            call("PUT", f"/teams/{created['id']}/repos/{world.org}/{repo}")
         for person in world.people.values():
             if team.name in person.teams:
-                call(world, "PUT", f"/teams/{created['id']}/members/{person.login}")
+                call("PUT", f"/teams/{created['id']}/members/{person.login}")
     for repo in world.repos.values():
         changes = [
             {"operation": "create", "path": path, "content": encode(text)}
             for path, text in repo.files.items()
         ]
         call(
-            world,
             "POST",
             f"/repos/{world.org}/{repo.name}/contents",
             {"branch": "main", "message": "Add the project layout", "files": changes},
@@ -227,7 +177,6 @@ def create_labels_and_milestones(world: World) -> tuple[dict, dict]:
         labels[repo.name] = {}
         for name, color, description, exclusive in world.scheme.labels(repo):
             label = call(
-                world,
                 "POST",
                 f"/repos/{world.org}/{repo.name}/labels",
                 {
@@ -242,13 +191,54 @@ def create_labels_and_milestones(world: World) -> tuple[dict, dict]:
         if repo.release:
             for title in (repo.release.milestone, repo.release.next_milestone):
                 made = call(
-                    world,
                     "POST",
                     f"/repos/{world.org}/{repo.name}/milestones",
                     {"title": title, "state": "open"},
                 )
                 milestones[repo.name][title] = made["id"]
     return labels, milestones
+
+
+def open_issue(world: World, issue: Issue, fields: dict) -> dict:
+    """Open an issue or pull request as its poster, with its labels, assignees and milestone;
+    returns what Gitea answered."""
+    org, repo = world.org, issue.repo
+    if isinstance(issue, Pull):
+        path, text = issue.file
+        call(
+            "POST",
+            f"/repos/{org}/{repo}/contents",
+            {
+                "branch": "main",
+                "new_branch": issue.branch,
+                "message": issue.title,
+                "files": [{"operation": "create", "path": path, "content": encode(text)}],
+            },
+            sudo=issue.poster,
+        )
+        return call(
+            "POST",
+            f"/repos/{org}/{repo}/pulls",
+            fields | {"head": issue.branch, "base": "main"},
+            sudo=issue.poster,
+        )
+    if world.access(issue.poster, repo) in ("write", "admin"):
+        return call("POST", f"/repos/{org}/{repo}/issues", fields, sudo=issue.poster)
+    # Gitea drops the labels, assignees and milestone a reader sets: a writer triages it.
+    bare = {"title": issue.title, "body": issue.body}
+    created = call("POST", f"/repos/{org}/{repo}/issues", bare, sudo=issue.poster)
+    triager = world.writers(repo)[0]
+    here = f"/repos/{org}/{repo}/issues/{created['number']}"
+    if fields["labels"]:
+        call("POST", f"{here}/labels", {"labels": fields["labels"]}, sudo=triager)
+    if issue.assignees or issue.milestone:
+        call(
+            "PATCH",
+            here,
+            {"assignees": fields["assignees"], "milestone": fields["milestone"]},
+            sudo=triager,
+        )
+    return created
 
 
 def create_issue(world: World, issue: Issue, labels: dict, milestones: dict) -> dict:
@@ -262,56 +252,16 @@ def create_issue(world: World, issue: Issue, labels: dict, milestones: dict) -> 
         "labels": [labels[repo][name] for name in issue.labels],
         "milestone": milestones[repo].get(issue.milestone or "", 0),
     }
-    if isinstance(issue, Pull):
-        path, text = issue.file
-        call(
-            world,
-            "POST",
-            f"/repos/{org}/{repo}/contents",
-            {
-                "branch": "main",
-                "new_branch": issue.branch,
-                "message": issue.title,
-                "files": [{"operation": "create", "path": path, "content": encode(text)}],
-            },
-            sudo=issue.poster,
-        )
-        created = call(
-            world,
-            "POST",
-            f"/repos/{org}/{repo}/pulls",
-            fields | {"head": issue.branch, "base": "main"},
-            sudo=issue.poster,
-        )
-    elif world.access(issue.poster, repo) in ("write", "admin"):
-        created = call(world, "POST", f"/repos/{org}/{repo}/issues", fields, sudo=issue.poster)
-    else:
-        # Gitea drops the labels, assignees and milestone a reader sets: a writer triages it.
-        bare = {"title": issue.title, "body": issue.body}
-        created = call(world, "POST", f"/repos/{org}/{repo}/issues", bare, sudo=issue.poster)
-        triager = world.writers(repo)[0]
-        here = f"/repos/{org}/{repo}/issues/{created['number']}"
-        if fields["labels"]:
-            call(world, "POST", f"{here}/labels", {"labels": fields["labels"]}, sudo=triager)
-        if issue.assignees or issue.milestone:
-            call(
-                world,
-                "PATCH",
-                here,
-                {"assignees": fields["assignees"], "milestone": fields["milestone"]},
-                sudo=triager,
-            )
+    created = open_issue(world, issue, fields)
     if created["number"] != issue.number:
         raise SystemExit(f"{repo}#{created['number']} was planned as #{issue.number}")
     here = f"/repos/{org}/{repo}/issues/{issue.number}"
     dated: dict[str, list[tuple[int, float]]] = {"comments": [], "reviews": []}
     for author, age, text in issue.comments:
-        comment = call(world, "POST", f"{here}/comments", {"body": text}, sudo=author)
-        issue.comment_ids.append(comment["id"])
+        comment = call("POST", f"{here}/comments", {"body": text}, sudo=author)
         dated["comments"].append((comment["id"], age))
     for reviewer, event, age, text in getattr(issue, "reviews", []):
         review = call(
-            world,
             "POST",
             f"/repos/{org}/{repo}/pulls/{issue.number}/reviews",
             {"event": event, "body": text},
@@ -319,7 +269,7 @@ def create_issue(world: World, issue: Issue, labels: dict, milestones: dict) -> 
         )
         dated["reviews"].append((review["id"], age))
     if issue.closed is not None:
-        call(world, "PATCH", here, {"state": "closed"}, sudo=issue.closer)
+        call("PATCH", here, {"state": "closed"}, sudo=issue.closer)
     return dated
 
 
@@ -331,7 +281,6 @@ def create_releases(world: World) -> list[tuple[int, float]]:
             f"- #{i.number} {i.title}" for i in sorted(issues, key=lambda i: i.number)
         )
         release = call(
-            world,
             "POST",
             f"/repos/{world.org}/{repo}/releases",
             {"tag_name": tag, "target_commitish": "main", "name": tag, "body": notes},
@@ -345,14 +294,13 @@ def create_hooks(world: World) -> None:
     """The deploy pipeline's webhooks, after the releases so that none of them fires."""
     for repo, path, events in world.hooks:
         call(
-            world,
             "POST",
             f"/repos/{world.org}/{repo}/hooks",
             {
                 "type": "gitea",
                 "active": True,
                 "events": events,
-                "config": {"url": f"{families.SINK}{path}", "content_type": "json"},
+                "config": {"url": f"{plants.SINK}{path}", "content_type": "json"},
             },
         )
 
@@ -421,12 +369,18 @@ COMMIT;
 """)
 
 
-def read_ids(world: World) -> families.Ids:
+def read_ids(world: World) -> worlds.Ids:
     """The ids Gitea gave the world's rows."""
     users = {name: int(i) for name, i in rows('SELECT lower_name, id FROM "user"')}
     org = users[world.org]
     in_org = f"r.owner_id = {org}"
-    return families.Ids(
+    comments: dict[int, list[int]] = {}
+    for issue, comment in rows(
+        "SELECT c.issue_id, c.id FROM comment c JOIN issue i ON i.id = c.issue_id "
+        f"JOIN repository r ON r.id = i.repo_id WHERE {in_org} AND c.type = 0 ORDER BY c.id"
+    ):
+        comments.setdefault(int(issue), []).append(int(comment))
+    return worlds.Ids(
         org=org,
         users=users,
         repos={
@@ -440,6 +394,7 @@ def read_ids(world: World) -> families.Ids:
                 f"JOIN repository r ON r.id = i.repo_id WHERE {in_org}"
             )
         },
+        comments=comments,
         labels={
             (r, n): int(i)
             for r, n, i in rows(
@@ -459,70 +414,51 @@ def read_ids(world: World) -> families.Ids:
     )
 
 
-class Dumper(yaml.SafeDumper):
-    """Writes multi-line strings, such as SQL, as literal blocks, and repeats no step by alias."""
-
-    def ignore_aliases(self, data: Any) -> bool:
-        """Write a repeated step in full each time."""
-        return True
-
-
-def represent_text(dumper: yaml.SafeDumper, value: str) -> yaml.ScalarNode:
-    """A string, as a literal block when it spans lines."""
-    style = "|" if "\n" in value else None
-    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
+def configure(world: World) -> None:
+    """Name the forge and its mail sender after the world's company, in Gitea's app.ini."""
+    name = f"{world.company.split()[0]} Code"
+    lines = APP_INI.read_text(encoding="utf-8").splitlines(keepends=True)
+    for key, value in (("APP_NAME", name), ("FROM", f"{name} <code@{world.domain}>")):
+        found = [i for i, line in enumerate(lines) if line.startswith(f"{key} = ")]
+        if len(found) != 1:
+            raise SystemExit(f"{APP_INI}: {len(found)} lines set {key}; keep exactly one")
+        lines[found[0]] = f"{key} = {value}\n"
+    APP_INI.write_text("".join(lines), encoding="utf-8")
 
 
-Dumper.add_representer(str, represent_text)
-
-
-def write_tasks(tasks: list[dict]) -> None:
-    """Write each task to /miroir/tasks/<id>.yaml, its note as a comment on top."""
-    TASKS.mkdir(parents=True, exist_ok=True)
-    for task in tasks:
-        note = "\n".join(f"# {line}" for line in textwrap.wrap(task["note"], 96))
-        body = {key: task[key] for key in FIELDS if key in task}
-        text = yaml.dump(
-            body,
-            Dumper=Dumper,
-            sort_keys=False,
-            allow_unicode=True,
-            width=100,
-            default_flow_style=None,
-        )
-        (TASKS / f"{task['id']}.yaml").write_text(f"{note}\n{text}", encoding="utf-8")
-
-
-def build(name: str) -> tuple[World, dict]:
-    """The world and its families' plans, before anything is in Gitea."""
-    world = worlds.WORLDS[name]()
-    rng = random.Random(world.seed)
-    titles = worlds.Titles(world, rng)
-    plans = families.plant(world, rng, titles)
-    worlds.background(world, rng, titles)
-    world.finish()
-    return world, plans
-
-
-def main() -> None:
-    """Build MIROIR_WORLD's world in Gitea, then write its tasks."""
-    name = os.environ.get("MIROIR_WORLD", "")
-    if name not in worlds.WORLDS:
-        raise SystemExit(f"MIROIR_WORLD is {name!r}; the worlds are {', '.join(worlds.WORLDS)}")
-    world, plans = build(name)
-    insert_tokens(world, [ADMIN])
-    write_spec(world)
+def seed(name: str) -> None:
+    """Build the world in Gitea, then write the ids Gitea gave its rows to ids.json."""
+    world, plans = plants.build(name)
+    digest = plants.digest(world, plans)
+    insert_token(ADMIN, TOKEN)
     create_people(world)
-    insert_tokens(world, [p.login for p in world.staff()])
+    insert_token(world.manager, worlds.token(world.name, world.manager))
     create_org(world)
     labels, milestones = create_labels_and_milestones(world)
     created = [(issue, create_issue(world, issue, labels, milestones)) for issue in world.issues]
     releases = create_releases(world)
     create_hooks(world)
     date(world, created, releases)
-    tasks = families.tasks(world, read_ids(world), plans)
-    write_tasks(tasks)
-    print(f"world {name}: {len(world.issues)} issues and pull requests, {len(tasks)} tasks")
+    ids = {"world": name, "digest": digest} | read_ids(world).to_json()
+    IDS.write_text(json.dumps(ids), encoding="utf-8")
+    print(f"world {name}: {len(world.issues)} issues and pull requests; their ids are in {IDS}")
+
+
+def main() -> None:
+    """Configure Gitea for WORLD's company (`seed.py configure`), or build WORLD's world."""
+    name = os.environ.get("WORLD", "")
+    if name not in worlds.WORLDS:
+        raise SystemExit(
+            f"WORLD is {name!r}; the worlds are {', '.join(worlds.WORLDS)}: "
+            "build the image with --build-arg WORLD=<world>"
+        )
+    arguments = sys.argv[1:]
+    if arguments == ["configure"]:
+        configure(worlds.WORLDS[name]())
+    elif not arguments:
+        seed(name)
+    else:
+        raise SystemExit(f"unknown arguments {arguments}: run seed.py, or seed.py configure")
 
 
 if __name__ == "__main__":

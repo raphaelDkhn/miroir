@@ -1,44 +1,16 @@
-//! Miroir runs inside a product's container and turns it into an RL environment: it bakes a
-//! seed snapshot at image build, restores it before each episode, serves the agent's tools over
-//! `OpenEnv` and MCP, and grades the end state from the changes and outbound calls it captured.
-
-mod bake;
-mod check;
-mod clock;
-mod code;
-mod coworker;
-mod db;
-mod edb;
-mod env;
-mod episode;
-mod export;
-mod grade;
-mod import;
-mod manifest;
-mod mcp;
-mod record;
-mod sandbox;
-mod scrub;
-mod server;
-mod sinks;
-mod state;
-mod supervisor;
-mod task;
-mod tools;
+//! The `miroir` command line: it parses the subcommand, calls the library, and maps the result
+//! to an exit status.
 
 use std::io::{IsTerminal, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
-use std::time::Duration;
 
-use anyhow::Context;
 use clap::{Parser, Subcommand};
-use tokio::signal::unix::{SignalKind, signal};
+use miroir::manifest::Manifest;
+use miroir::paths::{self, Paths};
+use miroir::{bake, check, collect, draft, grade, run};
 
-use crate::env::{Env, EnvError, Paths};
-use crate::manifest::Manifest;
-
-/// Turn a product's container into an RL environment.
+/// Turn a product's container image into graded Harbor environments.
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
@@ -48,39 +20,117 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Serve the env: restore the seed state, then serve episodes over WebSocket and MCP.
-    Run,
-    /// Seed every world and keep its state as the pristine copy, when building the image.
+    /// Bake the world into the image: the last RUN of a world Dockerfile.
     Bake,
-    /// Check that the env and its tasks grade reliably.
+    /// Boot the world and supervise it: the world image's CMD.
+    Run,
+    /// Write the episode's evidence: Harbor's collect hook in the world service.
+    Collect,
+    /// Grade the evidence with the task's grading spec: the verifier's /tests/test.sh.
+    Grade,
+    /// Check task directories and Harbor job results, on the host.
     Check {
-        /// Print the full report as JSON.
+        /// A directory of task directories, searched recursively.
+        #[arg(long, value_name = "DIR")]
+        tasks: Vec<PathBuf>,
+        /// Print the report as JSON.
         #[arg(long)]
         json: bool,
-        /// Also replay each golden run once without each of its calls.
-        #[arg(long)]
-        mutate: bool,
-        /// Check only this world's tasks.
-        #[arg(long)]
-        world: Option<String>,
+        /// A Harbor job directory.
+        #[arg(value_name = "JOB_DIR")]
+        jobs: Vec<PathBuf>,
     },
-    /// Serve the sandbox that runs the agent's code, in a container of its own.
-    Sandbox,
-    /// Scrub production database dumps, and agent traces, into seed data.
-    Import(import::Args),
-    /// Write the tasks for another harness to run.
-    #[command(subcommand)]
-    Export(export::Format),
+    /// Draft a grading spec from the evidence of reference runs, on the host.
+    Draft {
+        /// A Harbor trial directory, or an evidence.db file.
+        #[arg(required = true, value_name = "INPUT")]
+        inputs: Vec<PathBuf>,
+    },
 }
+
+/// The exit status of a void grade, which Harbor and verifiers record as an invalid trial.
+const VOID: u8 = 75;
+/// The exit status of `check` and `draft` on a usage or I/O error.
+const USAGE: u8 = 2;
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    let paths = Paths::default();
+    match Cli::parse().command {
+        Command::Bake => {
+            logs();
+            world(bake(&paths).await)
+        }
+        Command::Run => {
+            logs();
+            world(run(&paths).await)
+        }
+        Command::Collect => {
+            logs();
+            world(collect(&paths).await)
+        }
+        Command::Grade => grade(&paths).await,
+        Command::Check { tasks, json, jobs } => {
+            logs();
+            verdict(check::run(&check::Args { tasks, jobs, json }, &mut std::io::stdout()))
+        }
+        Command::Draft { inputs } => {
+            logs();
+            verdict(draft::run(&draft::DraftArgs { inputs }, &mut std::io::stdout()).await)
+        }
+    }
+}
+
+/// Log to stderr; `grade` installs no logger, so nothing precedes its result.
+fn logs() {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
         .with_target(false)
         .init();
-    match dispatch(Cli::parse().command).await {
+}
+
+async fn bake(paths: &Paths) -> anyhow::Result<()> {
+    let manifest = Manifest::load(&paths.manifest())?;
+    bake::bake(paths, &manifest).await
+}
+
+async fn run(paths: &Paths) -> anyhow::Result<()> {
+    let manifest = Manifest::load(&paths.manifest())?;
+    run::run(paths, &manifest).await
+}
+
+async fn collect(paths: &Paths) -> anyhow::Result<()> {
+    let manifest = Manifest::load(&paths.manifest())?;
+    let summary = collect::collect(paths, &manifest).await?;
+    let faults: Vec<&str> = summary.faults.iter().map(|fault| fault.kind.as_str()).collect();
+    writeln!(
+        std::io::stdout(),
+        "evidence: {} changes, {} effects, {} bytes; faults: [{}]",
+        summary.changes,
+        summary.effects,
+        summary.bytes,
+        faults.join(", "),
+    )?;
+    Ok(())
+}
+
+async fn grade(paths: &Paths) -> ExitCode {
+    let inputs = grade::Inputs {
+        spec: std::env::var(paths::SPEC_VAR).ok(),
+        evidence: paths.evidence(),
+        answer: PathBuf::from(paths::ANSWER),
+        out_dir: PathBuf::from(paths::VERIFIER_DIR),
+    };
+    match grade::grade(&inputs, &mut std::io::stdout()).await {
+        grade::Outcome::Scored { .. } => ExitCode::SUCCESS,
+        grade::Outcome::Void(_) => ExitCode::from(VOID),
+    }
+}
+
+/// `bake`, `run` and `collect`: 0, or 1 with the error logged.
+fn world(result: anyhow::Result<()>) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("{e:#}");
@@ -89,190 +139,14 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn dispatch(command: Command) -> anyhow::Result<()> {
-    supervisor::ensure_entrypoint()?;
-    match command {
-        Command::Run => run().await,
-        Command::Bake => bake().await,
-        Command::Check { json, mutate, world } => check(json, mutate, world.as_deref()).await,
-        Command::Sandbox => sandbox::serve(port()?).await,
-        Command::Import(args) => {
-            import::run(&args).await?;
-            tracing::info!(out = %args.out.display(), "import finished");
-            Ok(())
+/// `check` and `draft`: 0 on `Ok(true)`, 1 on `Ok(false)`, 2 with the error logged.
+fn verdict(result: anyhow::Result<bool>) -> ExitCode {
+    match result {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(e) => {
+            tracing::error!("{e:#}");
+            ExitCode::from(USAGE)
         }
-        Command::Export(export::Format::Harbor(args)) => export::harbor(&args),
-    }
-}
-
-async fn bake() -> anyhow::Result<()> {
-    let paths = Paths::default();
-    let manifest = Manifest::load(&paths.manifest())?;
-    // Tasks already in the image fail the build before a long bake; a seed may write the rest.
-    if task::has_task_files(&paths.tasks())? {
-        manifest.load_tasks(&paths.tasks())?;
-    }
-    sinks::start(&manifest.sinks, None).await.context("cannot start the sinks")?;
-    bake::run(&paths, &manifest).await?;
-    let tasks = manifest.load_tasks(&paths.tasks())?;
-    tracing::info!(tasks = tasks.len(), "bake finished");
-    Ok(())
-}
-
-async fn check(json: bool, mutate: bool, world: Option<&str>) -> anyhow::Result<()> {
-    let report = match Env::open(Paths::default(), sandbox()?).await.map(Arc::new) {
-        Ok(env) => {
-            let worlds = &env.manifest.worlds;
-            if let Some(world) = world.filter(|world| !worlds.iter().any(|w| w == world)) {
-                anyhow::bail!("unknown world '{world}'; the manifest has {}", worlds.join(", "));
-            }
-            sinks::start(&env.manifest.sinks, Some(env.edb.clone()))
-                .await
-                .context("cannot start the sinks")?;
-            serve_proxy(&env).await?;
-            let report = check::run(&env, mutate, world).await;
-            env.shutdown().await;
-            report
-        }
-        Err(e) => check::static_failure(&e.to_string()),
-    };
-    let text = if json { serde_json::to_string_pretty(&report)? } else { check::summary(&report) };
-    writeln!(std::io::stdout().lock(), "{text}")?;
-    if report["passed"] == true { Ok(()) } else { Err(anyhow::anyhow!("miroir check failed")) }
-}
-
-fn sandbox() -> anyhow::Result<Option<code::Sandbox>> {
-    match std::env::var("MIROIR_SANDBOX") {
-        Ok(url) => Ok(Some(code::Sandbox::new(&url).map_err(anyhow::Error::msg)?)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(e) => Err(anyhow::anyhow!("MIROIR_SANDBOX: {e}")),
-    }
-}
-
-async fn serve_proxy(env: &Arc<Env>) -> anyhow::Result<()> {
-    if env.sandbox.is_none() {
-        return Ok(());
-    }
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", code::PROXY_PORT))
-        .await
-        .with_context(|| format!("cannot listen on port {} for the sandbox", code::PROXY_PORT))?;
-    let proxy = code::proxy(env.clone());
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, proxy).await {
-            tracing::error!("the sandbox's proxy stopped: {e}");
-        }
-    });
-    Ok(())
-}
-
-fn port() -> anyhow::Result<u16> {
-    match std::env::var("MIROIR_PORT") {
-        Ok(port) => port.parse().context("MIROIR_PORT must be a port number"),
-        Err(_) => Ok(8000),
-    }
-}
-
-fn token_var(name: &str) -> anyhow::Result<Option<String>> {
-    match std::env::var(name) {
-        Ok(token) if !token.is_empty() => Ok(Some(token)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        _ => Err(anyhow::anyhow!("{name} must not be empty; set it to a token, or unset it")),
-    }
-}
-
-/// `MIROIR_TOKEN`, which opens every route, and `MIROIR_AGENT_TOKEN`, which opens `/mcp`
-/// alone.
-fn bearer_tokens() -> anyhow::Result<(Option<String>, Option<String>)> {
-    let token = token_var("MIROIR_TOKEN")?;
-    let agent_token = token_var("MIROIR_AGENT_TOKEN")?;
-    if agent_token.is_some() && token.is_none() {
-        anyhow::bail!(
-            "MIROIR_AGENT_TOKEN keeps an agent to /mcp only if MIROIR_TOKEN guards the other \
-             routes; set MIROIR_TOKEN too"
-        );
-    }
-    if agent_token.is_some() && agent_token == token {
-        anyhow::bail!("MIROIR_AGENT_TOKEN must differ from MIROIR_TOKEN, which opens every route");
-    }
-    Ok((token, agent_token))
-}
-
-async fn warn_if_online() {
-    if reachable(("1.1.1.1", 443)).await {
-        tracing::warn!(
-            "this env can reach the internet, so calls the product makes past the sinks are \
-             neither recorded nor blocked; run it on an internal network"
-        );
-    }
-}
-
-async fn reachable(address: impl tokio::net::ToSocketAddrs) -> bool {
-    let connect = tokio::net::TcpStream::connect(address);
-    matches!(tokio::time::timeout(Duration::from_secs(1), connect).await, Ok(Ok(_)))
-}
-
-async fn run() -> anyhow::Result<()> {
-    if rustix::process::getpid().is_init() {
-        tracing::warn!("miroir is PID 1, so the orphans a reset leaves are never reaped; use tini");
-    }
-    let env = Arc::new(Env::open(Paths::default(), sandbox()?).await?);
-    sinks::start(&env.manifest.sinks, Some(env.edb.clone()))
-        .await
-        .context("cannot start the sinks")?;
-    serve_proxy(&env).await?;
-    let port = port()?;
-    let (token, agent_token) = bearer_tokens()?;
-    if token.is_none() {
-        tracing::warn!(port, "MIROIR_TOKEN is not set, so anyone who can reach this port can act");
-    }
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
-        .await
-        .with_context(|| format!("cannot listen on port {port}"))?;
-    let router = server::router(env.clone(), token, agent_token);
-    let mut serving = tokio::spawn(server::serve(listener, router));
-    tracing::info!(port, "serving OpenEnv");
-    tokio::spawn(warn_if_online());
-
-    let mut terminate = signal(SignalKind::terminate()).context("cannot watch SIGTERM")?;
-    let boot = async {
-        env.boot().await?;
-        if let Some(sandbox) = &env.sandbox {
-            sandbox.probe(&[code::PROXY_PORT, port]).await.map_err(EnvError::Other)?;
-        }
-        Ok::<(), EnvError>(())
-    };
-    tokio::pin!(boot);
-    let mut booted = false;
-    let outcome = loop {
-        tokio::select! {
-            result = &mut boot, if !booted => match result {
-                Ok(()) => {
-                    booted = true;
-                    tracing::info!("env ready");
-                }
-                Err(e) => break Err(anyhow::Error::new(e).context("the env could not start")),
-            },
-            result = &mut serving => break Err(anyhow::anyhow!("the server stopped: {result:?}")),
-            _ = terminate.recv() => break Ok(()),
-            result = tokio::signal::ctrl_c() => break result.context("cannot watch Ctrl-C"),
-        }
-    };
-    tracing::info!("stopping");
-    env.shutdown().await;
-    tracing::info!("stopped");
-    outcome
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn an_open_port_is_reachable_and_a_closed_one_is_not() {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        assert!(reachable(("127.0.0.1", port)).await);
-        drop(listener);
-        assert!(!reachable(("127.0.0.1", 1)).await, "nothing listens on port 1");
     }
 }
