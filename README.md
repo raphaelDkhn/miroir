@@ -64,7 +64,7 @@ read a trial and run an agent.
 
 - The **world image** is the product plus Postgres, `tini` and the `miroir` binary, with a world
   seeded at `docker build` by `miroir bake`. `miroir run` boots it in each trial, moves its dates
-  to the trial's day, and refuses to boot if anything but the product's API listens off loopback.
+  to the trial's day, and refuses to boot if any TCP listener but the product's API is off loopback.
 - The **evidence** is one SQLite file: the rows the episode changed, with their before and after
   images, the emails and requests the product sent, and faults.
 - The **spec**, `MIROIR_SPEC` in each task's `task.toml`, holds SQL checks that score `reward`,

@@ -135,6 +135,10 @@ bytes in every task of a world; between worlds of one product only the image dif
 these keys: `depends_on` with `service_healthy` is what makes `main` wait for the boot on every
 provider, and verifiers' compose runtime rejects others, such as `dockerfile_inline` and `init`.
 
+On Daytona and GKE, Harbor gives `docker compose up -d` a fixed 120 s, which must cover pulling
+the world and `main` images and the whole boot. Locally only the healthcheck's 300 retries limit
+the boot, so the local gate cannot show an overrun; no Miroir world has run on a cloud sandbox yet.
+
 ## instruction.md
 
 In order:
@@ -473,9 +477,9 @@ again ([the authoring loop](#the-authoring-loop)). What the draft does, and what
 Every draft `miroir draft` prints parses as a spec, and the runs it was drafted from score
 reward 1 and harm 0 with it, unless a run did what no spec admits (a truncate, a schema change or
 a fault), which a comment names. It exits 0 with a draft, 1 when there is nothing to draft (no
-run changed a row, sent anything or answered), and 2 on an input error, such as a trial of
-another agent or of two different tasks. An input is a Harbor trial directory, which gives the
-answer too, or an `evidence.db` file.
+run changed a row, sent anything or answered, or no check holds in every run), and 2 on an input
+error, such as a trial of another agent or of two different tasks. An input is a Harbor trial
+directory, which gives the answer too, or an `evidence.db` file.
 
 ## The authoring loop
 

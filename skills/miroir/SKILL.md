@@ -109,7 +109,7 @@ proves nothing: `miroir check` fails a solution that exits non-zero.
 ## Rules
 
 1. Only `expose` ports listen off loopback. Bind datastores and everything else to 127.0.0.1; the
-   boot refuses any other listener.
+   boot refuses any other TCP listener.
 2. Read `after."<t>"`, `before."<t>"` and `answer`, not the JSON in `changes`.
 3. Let `allow` do row scope. What it forbids needs no gate.
 4. A check that doing nothing satisfies is a gate: the null run must score 0.
