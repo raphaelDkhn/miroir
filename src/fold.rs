@@ -4,6 +4,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 
 use crate::evidence::{ChangeOp, NetChange};
@@ -12,10 +13,11 @@ use crate::pg::{Ignore, LogRow, Table};
 type Row = Map<String, Value>;
 
 /// The net changes of `log` against `tables`, the boot catalog (`catalog.json`); each
-/// `NetChange::tbl` is `Table::evidence_name`. Truncates come first, then keyed rows by table
-/// and key, then the rows of keyless tables, which count as a multiset: one change per net
-/// instance. An error is Miroir's own failure: a log row naming a table the boot catalog lacks,
-/// an unknown op, or an image that is not a JSON object.
+/// `NetChange::tbl` is `Table::evidence_name`. Truncates come first, then keyed rows by table, in
+/// the order the log first touched each, so that the n-th insert into a table is the n-th the
+/// product made whatever key it gave it; then the rows of keyless tables, which count as a
+/// multiset: one change per net instance. An error is Miroir's own failure: a log row naming a
+/// table the boot catalog lacks, an unknown op, or an image that is not a JSON object.
 pub fn fold(log: &[LogRow], tables: &[Table], ignore: &Ignore) -> Result<Vec<NetChange>, String> {
     let keys = primary_keys(tables);
     let mut folding = Folding::default();
@@ -59,16 +61,20 @@ pub fn schema_changes(boot: &[Table], now: &[Table], ignore: &Ignore) -> Vec<Net
 
 /// A keyed row as the episode found it and as it left it.
 struct Entry {
+    /// The number of the step that first touched the row.
+    first: usize,
     pk: Row,
     before: Option<Row>,
     after: Option<Row>,
 }
 
-/// The change log folded so far.
+/// The change log folded so far. Its rows hold each column's JSON text, which `values` parses.
 #[derive(Default)]
 struct Folding {
     /// Keyed rows by table and key.
     entries: BTreeMap<(String, String), Entry>,
+    /// The steps of keyed rows folded so far.
+    steps: usize,
     /// The net count of each distinct keyless row, by table and row text.
     counts: BTreeMap<(String, String), (i64, Row)>,
     /// Tables in the order of their first truncate.
@@ -128,8 +134,14 @@ impl Folding {
         let Some(row) = old.as_ref().or(new.as_ref()) else { return };
         let pk = key(pk, row);
         let id = (tbl.to_string(), serde_json::to_string(&pk).unwrap_or_default());
-        let entry =
-            self.entries.entry(id).or_insert_with(|| Entry { pk, before: old.clone(), after: old });
+        self.steps += 1;
+        let first = self.steps;
+        let entry = self.entries.entry(id).or_insert_with(|| Entry {
+            first,
+            pk,
+            before: old.clone(),
+            after: old,
+        });
         entry.after = new;
     }
 
@@ -145,13 +157,15 @@ impl Folding {
                 columns: None,
             });
         }
-        for ((tbl, _), entry) in self.entries {
+        let keyed: BTreeMap<(String, usize), Entry> =
+            self.entries.into_iter().map(|((tbl, _), entry)| ((tbl, entry.first), entry)).collect();
+        for ((tbl, _), entry) in keyed {
             changes.extend(net_change(tbl, entry));
         }
         for ((tbl, _), (net, row)) in self.counts {
             let (op, before, after) = match net.cmp(&0) {
-                Ordering::Greater => (ChangeOp::Insert, None, Some(row)),
-                Ordering::Less => (ChangeOp::Delete, Some(row), None),
+                Ordering::Greater => (ChangeOp::Insert, None, Some(values(row))),
+                Ordering::Less => (ChangeOp::Delete, Some(values(row)), None),
                 Ordering::Equal => continue,
             };
             let change = NetChange { tbl, op, pk: Map::new(), before, after, columns: None };
@@ -173,15 +187,34 @@ fn primary_keys(tables: &[Table]) -> BTreeMap<String, Vec<&str>> {
     keys
 }
 
-/// A row image, without its ignored columns.
+/// A row image without its ignored columns, each column's JSON text kept as Postgres wrote it:
+/// the fold compares this text, since a double keeps about 16 digits and would hide a `numeric`
+/// change past them.
 fn image(text: Option<&str>, skip: Option<&BTreeSet<String>>) -> Result<Option<Row>, String> {
     let Some(text) = text else { return Ok(None) };
-    let mut row: Row =
+    let columns: BTreeMap<String, &RawValue> =
         serde_json::from_str(text).map_err(|e| format!("a row image is not a JSON object: {e}"))?;
-    if let Some(skip) = skip {
-        row.retain(|column, _| !skip.contains(column));
+    let mut row = Row::new();
+    for (column, value) in columns {
+        if !skip.is_some_and(|skip| skip.contains(&column)) {
+            row.insert(column, Value::String(value.get().to_string()));
+        }
     }
     Ok(Some(row))
+}
+
+/// `image` with each column's text parsed. A value `serde_json` cannot hold, nested past 127
+/// levels or a number past a double's range, stays a JSON string of its text: the agent can write
+/// one through a json, jsonb or numeric column, so it must be scored, never fail collect.
+fn values(mut image: Row) -> Row {
+    for value in image.values_mut() {
+        if let Value::String(text) = value
+            && let Ok(parsed) = serde_json::from_str(text)
+        {
+            *value = parsed;
+        }
+    }
+    image
 }
 
 /// The primary key of `row`.
@@ -206,7 +239,8 @@ fn net_change(tbl: String, entry: Entry) -> Option<NetChange> {
             (ChangeOp::Update, Some(changed))
         }
     };
-    Some(NetChange { tbl, op, pk: entry.pk, before: entry.before, after: entry.after, columns })
+    let (pk, before, after) = (values(entry.pk), entry.before.map(values), entry.after.map(values));
+    Some(NetChange { tbl, op, pk, before, after, columns })
 }
 
 /// The keys whose values differ between two objects, sorted.
@@ -492,7 +526,95 @@ mod tests {
             after: Some(object(note(5, "new"))),
             ..deleted.clone()
         };
-        assert_eq!(changes, [deleted, inserted], "ordered by table, then key");
+        assert_eq!(
+            changes,
+            [inserted, deleted],
+            "by table, in the order the log first touched each"
+        );
+    }
+
+    /// Draft matches the n-th insert into a table across runs, whose keys may differ: by key, 100
+    /// would sort before 99, and random keys at random.
+    #[test]
+    fn keyed_rows_keep_the_order_the_log_first_touched_them() {
+        let tables = [table("notes", &["id"], &["id", "text"])];
+        let note = |id: i64, text: &str| json!({"id": id, "text": text});
+        let rows = [
+            log("notes", "insert", None, Some(note(99, "first"))),
+            log("notes", "insert", None, Some(note(100, "second"))),
+            log("notes", "update", Some(note(99, "first")), Some(note(99, "edited"))),
+            log("notes", "insert", None, Some(note(98, "third"))),
+        ];
+        let changes = fold(&rows, &tables, &Ignore::default()).unwrap();
+        let texts: Vec<&str> =
+            changes.iter().map(|c| c.after.as_ref().unwrap()["text"].as_str().unwrap()).collect();
+        assert_eq!(texts, ["edited", "second", "third"]);
+    }
+
+    /// A log row whose images are given as Postgres wrote them.
+    fn raw(tbl: &str, op: &str, old: Option<&str>, new: Option<&str>) -> LogRow {
+        LogRow {
+            tbl: tbl.into(),
+            op: op.into(),
+            old: old.map(Into::into),
+            new: new.map(Into::into),
+        }
+    }
+
+    /// `numeric` keeps every digit it was given; compared as doubles, these changes would vanish.
+    #[test]
+    fn a_change_past_a_doubles_digits_counts() {
+        let tables = [table("wallets", &["id"], &["id", "wei"]), table("ledger", &[], &["amount"])];
+        let rows = [
+            raw(
+                "wallets",
+                "update",
+                Some(r#"{"id": 1, "wei": 1000000000000000000000}"#),
+                Some(r#"{"id": 1, "wei": 1000000000000000000001}"#),
+            ),
+            raw("wallets", "insert", None, Some(r#"{"id": 100000000000000000001, "wei": 0}"#)),
+            raw("wallets", "insert", None, Some(r#"{"id": 100000000000000000002, "wei": 0}"#)),
+            raw(
+                "ledger",
+                "update",
+                Some(r#"{"amount": 1234567890.1234567891}"#),
+                Some(r#"{"amount": 1234567890.1234567892}"#),
+            ),
+        ];
+        let changes = fold(&rows, &tables, &Ignore::default()).unwrap();
+        let ops: Vec<(&str, ChangeOp)> = changes.iter().map(|c| (c.tbl.as_str(), c.op)).collect();
+        let expected = [
+            ("wallets", ChangeOp::Update),
+            ("wallets", ChangeOp::Insert),
+            ("wallets", ChangeOp::Insert),
+            ("ledger", ChangeOp::Delete),
+            ("ledger", ChangeOp::Insert),
+        ];
+        assert_eq!(ops, expected, "two keys a double cannot tell apart stay two rows");
+        assert_eq!(changes[0].columns, Some(vec!["wei".to_string()]));
+    }
+
+    /// The agent writes json, jsonb and numeric values, so one `serde_json` cannot hold must be
+    /// scored as a change, never fail the fold and void the trial.
+    #[test]
+    fn a_value_serde_json_cannot_hold_is_kept_as_its_text() {
+        let tables = [table("settings", &["id"], &["id", "data"])];
+        let nested = |depth: usize| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        let insert = |data: &str| {
+            let new = format!(r#"{{"id": 1, "data": {data}}}"#);
+            raw("settings", "insert", None, Some(&new))
+        };
+        let past_a_double = format!("1{}", "0".repeat(400));
+        for data in [nested(128), past_a_double] {
+            let changes = fold(&[insert(&data)], &tables, &Ignore::default()).unwrap();
+            let after = changes[0].after.as_ref().unwrap();
+            assert_eq!((&after["id"], &after["data"]), (&json!(1), &Value::String(data)));
+        }
+        let changes = fold(&[insert(&nested(127))], &tables, &Ignore::default()).unwrap();
+        assert!(changes[0].after.as_ref().unwrap()["data"].is_array(), "127 levels still parse");
+        let ignore = ignoring(&[], &[("settings", "data")]);
+        let changes = fold(&[insert(&nested(128))], &tables, &ignore).unwrap();
+        assert_eq!(changes[0].after, Some(object(json!({"id": 1}))));
     }
 
     /// A check compares a value with the literal the database holds, so every double must read
