@@ -200,6 +200,7 @@ fn failed(step: u8, at: impl Display, error: impl Display) -> anyhow::Error {
 pub(crate) mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
     use crate::manifest::{Database, DbTime};
@@ -222,12 +223,17 @@ pub(crate) mod tests {
         }
     }
 
+    /// Numbers the temp roots of this process: tests run in parallel, and the clock alone can
+    /// give two of them one name.
+    static ROOTS: AtomicUsize = AtomicUsize::new(0);
+
     /// A new, empty directory under the temp directory.
     pub(crate) fn temp_root(name: &str) -> TempRoot {
         let nanos =
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let n = ROOTS.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir()
-            .join(format!("miroir-world-{name}-{}-{nanos}", std::process::id()));
+            .join(format!("miroir-world-{name}-{}-{n}-{nanos}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
         TempRoot(dir)
     }

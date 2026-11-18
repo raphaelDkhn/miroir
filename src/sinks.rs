@@ -452,6 +452,7 @@ mod tests {
     use tokio::task::JoinHandle;
 
     use super::*;
+    use crate::bake::tests::{TempRoot, temp_root};
     use crate::evidence::{self, Evidence};
 
     const LONG: Duration = Duration::from_secs(10);
@@ -463,12 +464,8 @@ mod tests {
     }
 
     /// A new directory of this test's own, and journals in it.
-    fn recording(name: &str) -> (PathBuf, Recording) {
-        let nanos =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("miroir-sink-{name}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+    fn recording(name: &str) -> (TempRoot, Recording) {
+        let dir = temp_root(name);
         let recording =
             Recording { effects: dir.join("effects.jsonl"), faults: dir.join("faults.jsonl") };
         (dir, recording)
@@ -596,7 +593,7 @@ Subject: Deal 1042 is now yours\r\nContent-Type: text/plain\r\n\r\nHello\r\n";
 
     #[tokio::test]
     async fn smtp_session_records_what_the_client_sent() {
-        let (dir, recording) = recording("smtp");
+        let (_dir, recording) = recording("smtp");
         let effects = recording.effects.clone();
         let (port, session) = one_session(recording).await;
         let mut client = Client::connect(port).await;
@@ -651,12 +648,11 @@ Subject: Deal 1042 is now yours\r\nContent-Type: text/plain\r\n\r\nHello\r\n";
         assert_eq!(second["from"], Value::Null, "DATA ended the transaction");
         assert_eq!(second["bcc"], json!([]));
         assert_eq!(recorded[2]["data"]["bcc"], json!([long]), "a long line is read whole");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
     async fn an_email_is_kept_whole_up_to_25_mib_then_truncated_with_one_sink_fault() {
-        let (dir, recording) = recording("big-email");
+        let (_dir, recording) = recording("big-email");
         let (effects, faults) = (recording.effects.clone(), recording.faults.clone());
         let port = free_port();
         let sinks = Sinks { smtp: Some(port), http: None, responses: BTreeMap::new() };
@@ -691,7 +687,6 @@ Subject: Deal 1042 is now yours\r\nContent-Type: text/plain\r\n\r\nHello\r\n";
                  {LIMIT} bytes"
             )})]
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -744,7 +739,6 @@ Subject: Deal 1042 is now yours\r\nContent-Type: text/plain\r\n\r\nHello\r\n";
         };
         let path = dir.join("evidence.db");
         evidence::write(&path, &evidence).await.unwrap();
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -777,12 +771,11 @@ Subject: Deal 1042 is now yours\r\nContent-Type: text/plain\r\n\r\nHello\r\n";
             faults: Vec::new(),
         };
         evidence::write(&dir.join("evidence.db"), &evidence).await.unwrap();
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
     async fn a_body_too_big_to_record_is_refused_with_one_sink_fault() {
-        let (dir, recording) = recording("big-body");
+        let (_dir, recording) = recording("big-body");
         let (effects, faults) = (recording.effects.clone(), recording.faults.clone());
         let port = free_port();
         let sinks = Sinks { smtp: None, http: Some(port), responses: BTreeMap::new() };
@@ -798,7 +791,6 @@ Subject: Deal 1042 is now yours\r\nContent-Type: text/plain\r\n\r\nHello\r\n";
         let detail = recorded[0]["detail"].as_str().unwrap();
         assert!(detail.starts_with("the HTTP sink cannot read PUT /s3/dump: "), "{detail}");
         assert_eq!(lines(&effects).len(), 1, "the refused upload is no effect");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -850,7 +842,7 @@ Subject: Deal 1042 is now yours\r\nContent-Type: text/plain\r\n\r\nHello\r\n";
 
     #[tokio::test]
     async fn a_session_that_ends_early_records_nothing() {
-        let (dir, recording) = recording("closed");
+        let (_dir, recording) = recording("closed");
         let effects = recording.effects.clone();
         let (port, session) = one_session(recording.clone()).await;
         let mut client = Client::connect(port).await;
@@ -868,7 +860,6 @@ Subject: Deal 1042 is now yours\r\nContent-Type: text/plain\r\n\r\nHello\r\n";
         drop(client);
         session.await.unwrap().unwrap();
         assert_eq!(lines(&effects), Vec::<Value>::new());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

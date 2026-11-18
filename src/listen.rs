@@ -150,6 +150,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::bake::tests::temp_root;
     use crate::manifest::{Database, DbTime, Process};
 
     const TCP: &str = concat!(
@@ -385,11 +386,7 @@ mod tests {
 
     #[test]
     fn both_tables_are_read_and_a_missing_ipv6_table_lists_none() {
-        let nanos =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("miroir-listen-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp_root("listen");
         let (tcp, tcp6) = (dir.join("tcp"), dir.join("tcp6"));
         std::fs::write(&tcp, TCP).unwrap();
         assert_eq!(tables(&tcp, &tcp6).unwrap(), parse(TCP), "a kernel without IPv6");
@@ -403,7 +400,6 @@ mod tests {
         let error = tables(&missing, &tcp6).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::NotFound);
         assert!(error.to_string().starts_with(&format!("cannot read {}: ", missing.display())));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn any_listener() -> impl Strategy<Value = Listener> {

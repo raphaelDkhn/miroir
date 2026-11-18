@@ -434,6 +434,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::bake::tests::temp_root;
 
     const LONG: Duration = Duration::from_secs(10);
 
@@ -455,16 +456,6 @@ mod tests {
 
     fn supervisor() -> Supervisor {
         Supervisor::new(BTreeMap::new(), None)
-    }
-
-    /// A new directory of this test's own.
-    fn scratch(name: &str) -> PathBuf {
-        let nanos =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("miroir-sup-{name}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
     }
 
     /// A loopback TCP port that nothing listens on.
@@ -511,7 +502,7 @@ mod tests {
 
     #[tokio::test]
     async fn processes_start_in_order_each_after_the_previous_one_is_ready() {
-        let dir = scratch("order");
+        let dir = temp_root("order");
         let order = dir.join("order");
         let port = free_port();
         let first = process(
@@ -542,7 +533,6 @@ mod tests {
         eventually("second started", || read(&order).contains("second")).await;
         assert_eq!(read(&order), "first\nready\nsecond\n");
         supervisor.stop(LONG).await.unwrap();
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -641,7 +631,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_manifest_env_overrides_the_parents_and_a_process_env_overrides_both() {
-        let dir = scratch("env");
+        let dir = temp_root("env");
         let out = dir.join("out");
         let env: BTreeMap<String, String> =
             [("HOME", "/manifest-home"), ("BOTH", "manifest"), ("ONLY", "m")]
@@ -658,18 +648,17 @@ mod tests {
             None,
         );
         web.env.insert("BOTH".into(), "process".into());
-        web.cwd = Some(dir.clone());
+        web.cwd = Some(dir.to_path_buf());
         supervisor.start(&[&web], LONG).await.unwrap();
         eventually("web wrote its environment", || read(&out).ends_with('\n')).await;
         let pwd = dir.canonicalize().unwrap();
         assert_eq!(read(&out), format!("process m /manifest-home {}\n", pwd.display()));
         supervisor.stop(LONG).await.unwrap();
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
     async fn a_crash_appends_one_fault_line() {
-        let dir = scratch("crash");
+        let dir = temp_root("crash");
         let faults = dir.join("faults.jsonl");
         let supervisor = Supervisor::new(BTreeMap::new(), Some(faults.clone()));
         let worker = process("worker", "sleep 0.1; exit 1", None);
@@ -686,7 +675,6 @@ mod tests {
             ]
         );
         supervisor.stop(LONG).await.unwrap();
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -700,7 +688,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_ends_every_child_in_reverse_order_and_records_no_crash() {
-        let dir = scratch("stop");
+        let dir = temp_root("stop");
         let (order, faults) = (dir.join("order"), dir.join("faults.jsonl"));
         let script = |name: &str| {
             format!(
@@ -723,12 +711,11 @@ mod tests {
         sleep(Duration::from_millis(100)).await;
         assert!(supervisor.crash().is_none());
         assert_eq!(journal::read(&faults).unwrap(), Vec::<serde_json::Value>::new());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
     async fn stop_kills_what_ignores_sigterm_past_the_limit() {
-        let dir = scratch("stubborn");
+        let dir = temp_root("stubborn");
         let trapped = dir.join("trapped");
         let script = format!(
             "trap '' TERM; echo trapped > '{}'; while :; do sleep 0.05; done",
@@ -740,7 +727,6 @@ mod tests {
         supervisor.start(&[&quick, &stubborn], LONG).await.unwrap();
         let started_pids = pids(&supervisor);
         eventually("stubborn ignores SIGTERM", || trapped.exists()).await;
-        std::fs::remove_dir_all(dir).unwrap();
         let started = Instant::now();
         supervisor.stop(Duration::from_secs(1)).await.unwrap();
         let elapsed = started.elapsed();
@@ -752,7 +738,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_command_past_its_limit_is_killed_with_its_children() {
-        let dir = scratch("limit");
+        let dir = temp_root("limit");
         let child = dir.join("child");
         let hung = sh(&format!("sleep 30 & echo $! > '{}'; wait", child.display()));
         let started = Instant::now();
@@ -763,7 +749,6 @@ mod tests {
         let pid: i32 = read(&child).trim().parse().unwrap();
         let pid = Pid::from_raw(pid).unwrap();
         eventually("the command's child was killed", || is_gone(pid)).await;
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -781,7 +766,7 @@ mod tests {
 
     #[tokio::test]
     async fn quiet_needs_two_passes_in_a_row() {
-        let dir = scratch("quiet");
+        let dir = temp_root("quiet");
         let runs = dir.join("runs");
         let quiet = sh(&format!(
             "n=$(cat '{0}' 2>/dev/null || echo 0); n=$((n + 1)); echo $n > '{0}'; [ $n -ne 2 ]",
@@ -791,7 +776,6 @@ mod tests {
         supervisor().wait_quiet(Some(&quiet), LONG).await.unwrap();
         assert_eq!(read(&runs), "4\n", "pass, fail, then two passes in a row");
         assert!(started.elapsed() >= QUIET_INTERVAL * 3, "runs start 200 ms apart");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
