@@ -172,45 +172,45 @@ but never makes it negative; for a penalty below 0, subtract it in the trainer (
 
 ## Results
 
-Measured on 2026-11-18 with the images built from this repository and the tasks at version 1.1.0,
-on a Mac with Docker Desktop 27.4 (12 CPUs and 8 GB of memory for its VM) and Harbor 0.26.0.
-Other builds and test runs shared the machine during the gate and determinism jobs; the boots
-and the one-at-a-time trials ran on an idle Docker VM.
+Measured on 2026-11-18 with the images built from this repository and the tasks at version 2.0.0,
+on a Mac with Docker Desktop 4.37 (Engine 27.4; 12 CPUs and 8 GB of memory for its VM) and
+Harbor 0.26.0. Another project's Harbor trials used the same Docker VM on and off: during the
+one-at-a-time trials, and possibly during the gate and determinism jobs. The boots had it to
+themselves.
 
 | Claim                                                         | Evidence                        |
 | ------------------------------------------------------------- | ------------------------------- |
 | Grader validation passes: 120 reference, 120 idle, 336 probes | all pass, no voids or errors    |
 | The same run scores the same every time                       | 3 reference runs per task agree |
-| A world boots in seconds                                      | 4.5 to 7.6 s locally            |
-| World image size                                              | 382 MB, 114 MB compressed       |
+| A world boots in seconds                                      | 3.5 to 4.7 s locally            |
+| World image size                                              | 380 MB, 114 MB compressed       |
 | A world boots within a cloud sandbox's 120 s                  | not yet run                     |
 | A frontier agent on the test split: reward, harm rate, pass^4 | not yet run                     |
 | Training on the train split improves held-out work            | open: not yet run               |
 
-- **The grader.** `harbor run -c examples/gitea/check.yaml -n 8` ran 720 trials in 32 min 25 s:
+- **The grader.** `harbor run -c examples/gitea/check.yaml -n 8` ran 720 trials in 38 min 1 s:
   every task with its reference solution, with `nop`, and with `SOLUTION=1` to `4`; 144 of those
   probe slots are past a task's probe count, and `miroir check` skips them. The reference
   solution scored reward 1 and harm 0 on 120 of 120 tasks, doing nothing 0 and 0 on 120 of 120,
   and 336 of 336 probes stayed within their bounds with the harm they declare. `miroir check`
-  found 0 violations, 0 voids and 0 check errors. The Docker VM had at most 4.0 GiB of memory in
+  found 0 violations, 0 voids and 0 check errors. The Docker VM had at most 4.2 GiB of memory in
   use. With Compose 2.38.2, `harbor lint` found nothing in the 120 tasks.
-- **Determinism.** The oracle alone with `-k 2` ran 240 trials in 10 min 27 s, before the last
-  change to the specs. Regraded with the current ones (`harbor job regrade`, 3 min 55 s; the
-  reference solutions have not changed), all 240 scored reward 1 and harm 0, and `miroir check`
-  over them and the gate job held each task's three reference runs to one reward and harm, with
-  0 violations.
-- **Boot.** `docker run --rm gitea-env:<world>`, twice per world: `booted in` 7.6 and 4.5 s
-  (orbit), 5.1 and 6.2 s (ferry), 6.0 and 4.7 s (kestrel). Starting Gitea took 2.1 to 3.6 s of
-  it, and waiting for its queues 1.7 to 3.4 s.
-- **Images.** Each world image is 381 to 382 MB, and 114 MB as `docker save | gzip`. The three
-  share every layer but their baked world, 66 MB. Baking a world (`RUN miroir bake`) took 127 to
-  134 s. `miroir-main` is 251 MB (80 MB compressed) and `miroir` 23 MB (9 MB).
+- **Determinism.** The oracle alone with `-k 2` ran 240 trials in 12 min 1 s, with at most
+  4.9 GiB of memory in use. All 240 scored reward 1 and harm 0, and `miroir check` over them and
+  the gate job held each task's three reference runs to one reward and harm, with 0 violations.
+- **Boot.** `docker run gitea-env:<world>`, twice per world: `booted in` 4.7 and 4.1 s (orbit),
+  4.2 and 3.5 s (ferry), 3.7 and 4.0 s (kestrel). Starting Gitea took 1.6 to 2.0 s of it, and
+  waiting for its queues 1.5 to 2.4 s.
+- **Images.** Each world image is 380 MB, and 113 to 114 MB as `docker save | gzip`. The three
+  share every layer but their baked world, 65 MB. Baking a world (`RUN miroir bake`) took 57 to
+  60 s, with the three baking at once. `miroir-main` is 251 MB (80 MB compressed) and `miroir`
+  23 MB (9 MB).
 - **Time per trial** (mean, then maximum). One at a time, the reference runs of ten tasks, one
-  per family, took 13.6 s (16.2 s): environment setup 7.0 s (9.4 s), agent 0.8 s (1.1 s), from
-  the agent's end to the verifier's start, which stops `main` and collects the evidence, 3.0 s
-  (3.6 s), and verifier 2.8 s (3.7 s). Over the gate job's 720 trials, 8 at a time on the
-  busy machine, a trial took 21.5 s (62.3 s): environment setup 11.8 s (33.7 s), agent 0.9 s
-  (23.3 s), collection 4.0 s (25.5 s), verifier 4.6 s (25.8 s).
+  per family, took 14.5 s (17.1 s): environment setup 7.4 s (9.1 s), agent 0.9 s (1.6 s), from
+  the agent's end to the verifier's start, which stops `main` and collects the evidence, 3.2 s
+  (4.0 s), and verifier 3.0 s (3.3 s). Over the gate job's 720 trials, 8 at a time, a trial took
+  25.2 s (52.7 s): environment setup 14.1 s (33.1 s), agent 1.3 s (5.9 s), collection 4.8 s
+  (9.3 s), verifier 5.1 s (10.1 s).
 - **Not run yet.** A cloud sandbox trial (Daytona gives a compose project 120 s to pull its
   images and boot), and a frontier agent on the test split, which spends API credit: both wait
   for the project owner's approval. Whether training on the train split improves held-out work
