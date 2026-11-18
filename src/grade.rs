@@ -121,7 +121,7 @@ pub fn allow_line(
         fields.push(format!("columns: [{}]", names.join(", ")));
     }
     if let Some(condition) = key_condition(key) {
-        fields.push(format!("where: {}", Value::from(condition)));
+        fields.push(format!("where: {}", yaml_quoted(&condition)));
     }
     format!("- {{{}}}", fields.join(", "))
 }
@@ -911,7 +911,16 @@ fn sql_name(name: &str) -> String {
 /// same text, else a quoted one.
 fn yaml_name(name: &str) -> String {
     let reserved = ["null", "true", "false"].contains(&name.to_ascii_lowercase().as_str());
-    if plain(name, ".") && !reserved { name.to_string() } else { Value::from(name).to_string() }
+    if plain(name, ".") && !reserved { name.to_string() } else { yaml_quoted(name) }
+}
+
+/// `text` as a double-quoted YAML scalar: JSON's quoting, with a `\u` escape for each character
+/// JSON leaves raw but serde-saphyr refuses: DEL, the C1 controls, U+FFFE and U+FFFF.
+fn yaml_quoted(text: &str) -> String {
+    let refused = |c: char| c.is_control() || c == '\u{fffe}' || c == '\u{ffff}';
+    let escaped =
+        |c: char| if refused(c) { format!("\\u{:04x}", u32::from(c)) } else { c.to_string() };
+    Value::from(text).to_string().chars().map(escaped).collect()
 }
 
 /// Whether `name` is a letter or `_`, then letters, digits, `_` and the characters of `also`.
@@ -1561,19 +1570,19 @@ allow:
             .unwrap();
         sqlx::Connection::close(conn).await.unwrap();
         let written = std::fs::read(&inputs.evidence).unwrap();
-        let foreign = graded(&inputs).await;
-        let Outcome::Void(reason) = &foreign.outcome else { panic!("{:?}", foreign.outcome) };
         let prefix = format!("cannot read the evidence {}: ", inputs.evidence.display());
-        assert!(reason.starts_with(&prefix), "{reason}");
-        assert!(reason.contains("is evidence format 2, written by miroir 0.1.0"), "{reason}");
-        assert!(reason.contains("reads format 1"), "{reason}");
-        assert_eq!(foreign.files, Vec::<String>::new());
+        let foreign = format!(
+            "{prefix}it is evidence format 2, written by miroir 0.1.0, but this miroir ({}) \
+             reads format 1: grade it with the miroir image of the release that collected it",
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_void(&graded(&inputs).await, &foreign);
         assert_eq!(std::fs::read(&inputs.evidence).unwrap(), written, "the artifact is unchanged");
 
         std::fs::write(&inputs.evidence, "not a database").unwrap();
         let unreadable = graded(&inputs).await;
         let Outcome::Void(reason) = &unreadable.outcome else { panic!("{:?}", unreadable.outcome) };
-        assert!(reason.starts_with(&prefix), "{reason}");
+        assert!(reason.starts_with(&format!("{prefix}it is not Miroir evidence: ")), "{reason}");
         std::fs::remove_file(&inputs.evidence).unwrap();
         std::fs::create_dir(&inputs.evidence).unwrap();
         let directory = graded(&inputs).await;
@@ -2006,7 +2015,7 @@ allow:
     }
 
     #[test]
-    fn yaml_names_read_back_as_the_same_text() {
+    fn allow_line_names_and_where_read_back_as_the_same_text() {
         let names = [
             "invoices",
             "audit.log",
@@ -2054,13 +2063,18 @@ allow:
             "trail ",
             "tab\there",
             "new\nline",
+            "del\u{7f}",
+            "c1\u{80}\u{85}\u{9f}",
+            "non\u{fffe}\u{ffff}",
         ];
         for name in names {
-            let line = allow_line(name, Op::Update, Some(&[name.to_string()]), &Map::new());
+            let key = object(json!({ "k": name }));
+            let line = allow_line(name, Op::Update, Some(&[name.to_string()]), &key);
             let spec = format!("checks: [{{name: a, sql: SELECT 1}}]\nallow:\n{line}\n");
             let parsed = spec::parse(&spec).unwrap_or_else(|e| panic!("{name:?}: {e}\n{spec}"));
             assert_eq!(parsed.allow[0].table, name);
             assert_eq!(parsed.allow[0].columns.as_deref(), Some(&[name.to_string()][..]));
+            assert_eq!(parsed.allow[0].condition, key_condition(&key));
         }
     }
 
