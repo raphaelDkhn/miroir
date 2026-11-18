@@ -226,13 +226,13 @@ def test_a_test_world_holds_only_test_tasks_and_held_out_families_never_train(bu
 
 
 def steps_follow_the_contract(task: dict, steps: list[dict]) -> None:
-    """Each step is one request (method, path, maybe a body and a status) or an answer."""
+    """Each step is one request (method, path, maybe a body) or an answer."""
     assert steps, task["id"]
     for step in steps:
         if "answer" in step:
             assert set(step) == {"answer"}, task["id"]
             continue
-        assert {"method", "path"} <= set(step) <= {"method", "path", "body", "status"}, task["id"]
+        assert {"method", "path"} <= set(step) <= {"method", "path", "body"}, task["id"]
         assert step["path"].startswith("/") and not re.search(r"\s", step["path"]), step
 
 
@@ -777,7 +777,7 @@ def test_golden_runs_first_fetch_the_api_description(generated) -> None:
     for task in task_dirs(generated):
         lines = (task / "solution/solve.sh").read_text(encoding="utf-8").splitlines()
         assert 'exec bash "$(dirname "$0")/probe-$SOLUTION.sh"' in lines[4]
-        steps = [line for line in lines if re.match(r"(gitea|merge|expect|printf|curl) ", line)]
+        steps = [line for line in lines if re.match(r"(gitea|merge|printf|curl) ", line)]
         assert steps[0].startswith("curl -fsS -o /dev/null -H 'Authorization: token "), task.name
         assert steps[0].endswith(" http://gitea:3000/swagger.v1.json"), task.name
 
@@ -923,9 +923,6 @@ def test_steps_become_quoted_helper_calls() -> None:
     assert generator.command({"answer": "it's 3"}) == (
         "printf '%s\\n' 'it'\"'\"'s 3' >/logs/artifacts/answer.txt"
     )
-    assert generator.command({"method": "DELETE", "path": "/a?b=1&c=2", "status": 404}) == (
-        "expect 404 DELETE '/a?b=1&c=2'"
-    )
     merge = {"method": "POST", "path": "/repos/o/r/pulls/1/merge", "body": {"do": "merge"}}
     assert generator.command(merge) == 'merge /repos/o/r/pulls/1/merge \'{"do": "merge"}\''
     assert generator.command({"method": "PATCH", "path": "/x", "body": {}}) == "gitea PATCH /x '{}'"
@@ -993,11 +990,3 @@ def test_a_request_fails_the_script_on_an_http_error(tmp_path) -> None:
     assert calls == [
         f"-fsS -X GET http://gitea:3000/api/v1/version -H Authorization: token {token}"
     ]
-
-
-def test_a_step_with_a_status_asserts_it(tmp_path) -> None:
-    step = {"method": "DELETE", "path": "/repos/orbit/api", "status": 404}
-    assert run_script(tmp_path, [step], STUB_OK="404")[0] == 0
-    status, _, stderr = run_script(tmp_path, [step], STUB_OK="204")
-    assert status != 0
-    assert "DELETE /repos/orbit/api answered 204, not 404" in stderr

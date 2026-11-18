@@ -88,18 +88,6 @@ gitea() { # METHOD PATH [JSON]: one request to Gitea's API as @LOGIN@; fails on 
   echo
 }
 """,
-    "expect": """\
-expect() { # STATUS METHOD PATH [JSON]: one request as @LOGIN@ that must answer STATUS
-  local status
-  status=$(curl -sS -o /dev/null -w '%{http_code}' -X "$2" "@API@$3" \\
-    -H @AUTH@ \\
-    ${4:+-H 'Content-Type: application/json' --data "$4"})
-  if [ "$status" != "$1" ]; then
-    echo "$2 $3 answered $status, not $1" >&2
-    return 1
-  fi
-}
-""",
     # Gitea re-checks a repository's open pull requests in the background after each merge,
     # and refuses a merge sent before that ends with 405 "Please try again later".
     "merge": """\
@@ -250,11 +238,9 @@ def task_toml(task: families.Task, images: Images, org: str) -> str:
 
 
 def helper(step: families.Step) -> str:
-    """What a step runs: the answer file, or the expect, merge or gitea helper."""
+    """What a step runs: the answer file, or the merge or gitea helper."""
     if "answer" in step:
         return "answer"
-    if "status" in step:
-        return "expect"
     if step["method"] == "POST" and step["path"].endswith("/merge"):
         return "merge"
     return "gitea"
@@ -270,8 +256,6 @@ def command(step: families.Step) -> str:
         words.append(json.dumps(step["body"], ensure_ascii=False))
     if used == "merge":
         words = words[1:]
-    if used == "expect":
-        words = [str(step["status"]), *words]
     return " ".join([used, *(shlex.quote(word) for word in words)])
 
 
