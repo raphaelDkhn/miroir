@@ -3,19 +3,13 @@
 Report vulnerabilities privately: on the repository's **Security** tab, choose **Report a
 vulnerability**. Don't open a public issue.
 
-Include the Miroir version or commit, how you ran the env, and the steps that reproduce the
-problem.
+Include the Miroir version or commit, the world and task involved, and the steps that reproduce
+the problem.
 
-## Scope
-
-Agents act on an env with whatever it lets them do, so these are vulnerabilities:
-
-- Reaching an env's API without `MIROIR_TOKEN`, or from a web page
-- Code in the `run_code` sandbox reaching anything but the env's proxy and server
-- `miroir import` leaving an original name, email or secret in what it writes
-
-Bugs in the sample products under `fixtures/` and `examples/` are not, unless they get an agent
-past one of these boundaries. A grader an agent can fool is a bug: open an issue.
+What Miroir protects, and what it does not, is in the
+[security model](https://raphaeldkhn.github.io/miroir/environment.html#security-model). A way
+around it is a vulnerability. Bugs in the sample products under `fixtures/` and `examples/` are
+not, unless they get an agent past the model. A grader an agent can fool is a bug: open an issue.
 
 ## Supported versions
 

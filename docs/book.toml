@@ -1,6 +1,6 @@
 [book]
 title = "Miroir"
-description = "Turn a product's Docker image into a reinforcement-learning environment for agents."
+description = "Turn a product's container image into Harbor environments graded from what the agent did to the product."
 language = "en"
 
 [build]
