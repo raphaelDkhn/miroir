@@ -1,5 +1,5 @@
-//! The grading spec, `MIROIR_SPEC` (§4.3): the checks that score progress, the gates that must
-//! hold, and the changes in scope. `grade` scores evidence with it; `check` validates it.
+//! The grading spec, `MIROIR_SPEC`: the checks that score progress, the gates that must hold, and
+//! the changes in scope. `grade` scores evidence with it; `check` validates it.
 
 use std::collections::BTreeMap;
 

@@ -1,5 +1,5 @@
-//! The `miroir` command line (§5): it parses the subcommand, calls the library, and maps the
-//! result to an exit status.
+//! The `miroir` command line: it parses the subcommand, calls the library, and maps the result
+//! to an exit status.
 
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;

@@ -1,4 +1,4 @@
-//! The evidence file, `/miroir/evidence/evidence.db` (§4.4): what an episode changed and sent.
+//! The evidence file, `/miroir/evidence/evidence.db`: what an episode changed and sent.
 //! `miroir collect` writes it once; `miroir grade` and `miroir draft` read it.
 
 use std::collections::BTreeMap;

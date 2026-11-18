@@ -1,5 +1,5 @@
-//! The graded Postgres database (§3.4-§3.6): its catalog, change capture into `miroir.log`, the
-//! date shift, and the one consistent read of the catalog and the change log that collect folds.
+//! The graded Postgres database: its catalog, change capture into `miroir.log`, the date shift,
+//! and the one consistent read of the catalog and the change log that collect folds.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};

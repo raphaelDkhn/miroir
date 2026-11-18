@@ -1,5 +1,5 @@
 //! Folding the change log into net changes against the boot catalog, and diffing the boot
-//! catalog against the live one (§3.6 step 4).
+//! catalog against the live one (collect step 4).
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -617,8 +617,9 @@ mod tests {
         assert_eq!(changes[0].after, Some(object(json!({"id": 1}))));
     }
 
-    /// A check compares a value with the literal the database holds, so every double must read
-    /// back exactly. Without `serde_json`'s `float_roundtrip`, about a third of these miss by a bit.
+    /// A check compares a value with the literal the database holds, so every double must
+    /// read back exactly. Without `serde_json`'s `float_roundtrip`, about a third of these
+    /// miss by a bit.
     #[test]
     fn row_images_keep_every_double_exactly() {
         let tables = [table("prices", &["id"], &["id", "amount"])];

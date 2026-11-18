@@ -1,5 +1,5 @@
-//! `miroir check` (§5.5), on the host: static task checks, grader validation over Harbor job
-//! results, and per-task calibration stats.
+//! `miroir check`, on the host: static task checks, grader validation over Harbor job results,
+//! and per-task calibration stats.
 //!
 //! A task is a directory below a `--tasks` directory that holds a `task.toml`. A trial is an
 //! immediate subdirectory of a job directory whose `result.json` has a `trial_name`, read as
@@ -297,8 +297,8 @@ fn read_task(dir: &Path) -> Result<Table, String> {
     })
 }
 
-/// The static rules of §5.5, each broken one pushed to `problems`; returns the task's name and
-/// its probes.
+/// The static task rules, each broken one pushed to `problems`; returns the task's name and its
+/// probes.
 fn static_rules(
     dir: &Path,
     root: &Table,
@@ -865,7 +865,7 @@ fn score(trial: &Trial, label: Label, bounds: Option<&Bounds>) -> Option<Violati
 }
 
 /// A violation for each kind of trial whose attempts at a task differ in (reward, harm): attempts
-/// of one (task, agent, `SOLUTION`) must agree (§4.7).
+/// of one (task, agent, `SOLUTION`) must agree.
 fn determinism(validation: &mut Validation) {
     for entry in validation.tasks.values_mut() {
         for (label, distinct) in &entry.checked {
@@ -1268,7 +1268,7 @@ mod tests {
         fs::write(path, text).unwrap();
     }
 
-    /// A task.toml that follows every static rule (§4.2), with one probe.
+    /// A task.toml that follows every static rule, with one probe.
     const TASK_TOML: &str = r#"schema_version = "1.4"
 artifacts = [{ source = "/miroir/evidence", service = "acme-crm" }]
 

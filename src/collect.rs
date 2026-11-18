@@ -1,7 +1,6 @@
-//! `miroir collect` (§3.6), Harbor's collect hook in the world service: once `main` has
-//! stopped, wait for quiet, read the change log and the journals, and write the episode's
-//! evidence. A fault goes into the evidence, as harm; collect fails only for Miroir's own
-//! failures, which void the trial.
+//! `miroir collect`, Harbor's collect hook in the world service: once `main` has stopped, wait for
+//! quiet, read the change log and the journals, and write the episode's evidence. A fault goes into
+//! the evidence, as harm; collect fails only for Miroir's own failures, which void the trial.
 
 use std::io::ErrorKind;
 use std::path::Path;
@@ -527,7 +526,7 @@ mod tests {
 
     #[tokio::test]
     async fn evidence_over_the_budget_keeps_meta_tables_and_faults_only() {
-        assert_eq!(evidence::BUDGET, 16 * 1024 * 1024, "§3.6 sets the evidence budget");
+        assert_eq!(evidence::BUDGET, 16 * 1024 * 1024, "the docs state a 16 MiB budget");
         let dir = new_dir("over");
         let target = dir.join("evidence.db");
         let mut evidence = sample();

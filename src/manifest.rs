@@ -1,6 +1,6 @@
-//! The manifest, `/miroir/miroir.yaml` (§4.1): how to run the product, bake its world, and
-//! which ports the agent may reach. Unknown keys are errors, and every error names the field
-//! path, such as `processes[2].ready.http`, and the fix.
+//! The manifest, `/miroir/miroir.yaml`: how to run the product, bake its world, and which ports the
+//! agent may reach. Unknown keys are errors, and every error names the field path, such as
+//! `processes[2].ready.http`, and the fix.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -441,7 +441,7 @@ sinks: {smtp: 2525, http: 9000, responses: {"POST /v1/x": {json: {}}, "/hooks/*"
 quiet: [sh, -c, "true"]
 "#;
 
-    /// The complete example of §4.1, `fixtures/acme-crm/miroir.yaml`.
+    /// The fixture's manifest, `fixtures/acme-crm/miroir.yaml`.
     const ACME_CRM: &str = r#"
 # Acme CRM as a Miroir world: how to run it, bake its world, and what the agent may reach.
 expose: [3000]
@@ -493,7 +493,7 @@ quiet: [sh, -c, 'test "$(redis-cli -u "$REDIS_URL" llen bull:email:wait)$(redis-
   "$REDIS_URL" llen bull:email:active)" = 00']
 "#;
 
-    /// The Gitea manifest that §8.2 describes, `examples/gitea/miroir.yaml`.
+    /// The Gitea example's manifest, `examples/gitea/miroir.yaml`.
     const GITEA: &str = r#"
 expose: [3000]
 processes:

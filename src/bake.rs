@@ -1,5 +1,5 @@
-//! `miroir bake` (§3.4), the last `RUN` of a world Dockerfile: seed the world, install change
-//! capture, and record the bake.
+//! `miroir bake`, the last `RUN` of a world Dockerfile: seed the world, install change capture,
+//! and record the bake.
 
 use std::collections::{BTreeSet, HashSet};
 use std::fmt::Display;
@@ -21,7 +21,7 @@ use crate::supervisor::{QUIET_LIMIT, READY_LIMIT, Supervisor};
 /// How long one `bake` or `seed` command may run.
 const COMMAND_LIMIT: Duration = Duration::from_secs(3600);
 
-/// The columns the grader adds to every row image (§4.4), which no captured column may shadow.
+/// The columns the grader adds to every row image, which no captured column may shadow.
 const RESERVED: [&str; 2] = ["_op", "_change"];
 
 /// `/miroir/bake.json`: when the bake started, and which Miroir baked.

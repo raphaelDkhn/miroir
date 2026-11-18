@@ -1,5 +1,5 @@
-//! `miroir draft` (Appendix B1), on the host: a draft `MIROIR_SPEC` from the evidence of one or
-//! more reference runs of a task, so that a reviewer edits a spec instead of writing one.
+//! `miroir draft`, on the host: a draft `MIROIR_SPEC` from the evidence of one or more reference
+//! runs of a task, so that a reviewer edits a spec instead of writing one.
 //!
 //! What every run did is drafted: each row change gets an `allow` entry and a check, and each
 //! request, email and answer gets a check, over the values every run shares. Row changes match
@@ -717,7 +717,7 @@ impl Draft {
     }
 
     /// Name the dates and times among `values`, which the draft compares as constants, though
-    /// every boot moves the world's dates to its own day (§3.5 step 5).
+    /// every boot moves the world's dates to its own day (boot step 5).
     fn timed(&mut self, table: &str, values: &Map<String, Value>) {
         let times = values.iter().filter(|(_, value)| timelike(value));
         self.times.extend(times.map(|(column, _)| format!("{table}.{column}")));
@@ -818,7 +818,7 @@ fn narrows(value: &Value) -> bool {
 }
 
 /// Whether `value` looks like a date, a timestamp, or a Unix time from 2000 to 2100 in seconds
-/// or milliseconds, as the evidence holds them (§4.4): each boot moves those to its own day.
+/// or milliseconds, as the evidence holds them: each boot moves those to its own day.
 fn timelike(value: &Value) -> bool {
     match value {
         Value::String(text) => dated(text),
@@ -929,7 +929,7 @@ mod tests {
     use crate::evidence::{CapturedTable, Evidence, Fault};
     use crate::grade::{Inputs, Outcome};
 
-    /// Where Harbor 0.26 puts a trial's evidence and answer (B1).
+    /// Where Harbor 0.26 puts a trial's evidence and answer.
     const EVIDENCE: &str = "artifacts/miroir/evidence/evidence.db";
     const ANSWER: &str = "artifacts/logs/artifacts/answer.txt";
     const PAY: &str = "acme/pay-invoice";
@@ -1107,7 +1107,7 @@ mod tests {
         Outcome::Scored { reward, harm }
     }
 
-    /// The draft of `inputs`, once the contract (B1) holds for it: it parses as a spec, and
+    /// The draft of `inputs`, once the contract holds for it: it parses as a spec, and
     /// grading each input's own evidence with it scores reward 1 and harm 0.
     async fn contract(inputs: &[&Path]) -> String {
         let (result, text) = drafted(inputs).await;
@@ -2401,7 +2401,7 @@ mod tests {
 
     proptest! {
         #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
-        /// The contract (B1) on random evidence: two runs that differ in assigned ids and
+        /// The contract on random evidence: two runs that differ in assigned ids and
         /// volatile values, the second with a change of its own when `extra` is set, with tricky
         /// names, values, effects and answers. No draft holds three `'` in a row.
         #[test]

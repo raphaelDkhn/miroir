@@ -1,5 +1,5 @@
 //! The world's processes: start in order until ready, wait for quiet, record crashes, stop in
-//! reverse order (§3.4, §3.5).
+//! reverse order.
 
 use std::collections::BTreeMap;
 use std::os::unix::process::ExitStatusExt;

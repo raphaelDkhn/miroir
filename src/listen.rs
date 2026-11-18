@@ -1,4 +1,4 @@
-//! The boot's listener audit (§3.5 step 8): only the manifest's `expose` ports may listen off
+//! The boot's listener audit (boot step 8): only the manifest's `expose` ports may listen off
 //! loopback, and each of them must.
 
 use std::collections::BTreeMap;
@@ -84,7 +84,7 @@ pub fn is_loopback(addr: IpAddr) -> bool {
     }
 }
 
-/// The two rules of §3.5 step 8. The error holds every violation's message, one per line, each
+/// The two rules of boot step 8. The error holds every violation's message, one per line, each
 /// naming the manifest process whose ready probe uses the port, when one does.
 pub fn audit(listeners: &[Listener], manifest: &Manifest) -> Result<(), String> {
     let owners = ready_ports(manifest);

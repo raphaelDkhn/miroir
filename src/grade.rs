@@ -1,7 +1,7 @@
-//! `miroir grade` (§3.7), the verifier's `/tests/test.sh`: score the evidence with the spec,
-//! write `reward-details.json` and `reward.json` and print a summary, or void. A trial voids only
-//! for Miroir's own failures (no spec or a broken one, no evidence or evidence of another format,
-//! outputs it cannot write); anything the agent can influence is scored (§3.8).
+//! `miroir grade`, the verifier's `/tests/test.sh`: score the evidence with the spec, write
+//! `reward-details.json` and `reward.json` and print a summary, or void. A trial voids only for
+//! Miroir's own failures (no spec or a broken one, no evidence or evidence of another format,
+//! outputs it cannot write); anything the agent can influence is scored.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -83,7 +83,7 @@ pub async fn grade(inputs: &Inputs, out: &mut impl std::io::Write) -> Outcome {
     outcome
 }
 
-/// The one row of the `answer` table (§4.4).
+/// The one row of the `answer` table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answer {
     /// The trimmed text; `None` when there is no answer.
@@ -103,7 +103,7 @@ pub fn answer(text: &str) -> Answer {
     Answer { value: Some(value.to_string()), number: value.parse().ok(), ids: ids(value) }
 }
 
-/// The paste-ready `allow` line for a change (§4.5), such as `- {table: invoices, op: update,
+/// The paste-ready `allow` line for a change, such as `- {table: invoices, op: update,
 /// columns: [paid_at, status], where: "id = 4020"}`: its `where` is the conjunction of
 /// `column = value` over `key` (`column IS NULL` for a null), and an empty `key` gets none. Names
 /// are quoted where YAML or SQLite would misread them. Grade passes a change's primary key;
@@ -176,7 +176,7 @@ fn text_literal(text: &str) -> String {
     format!("({})", parts.join(" || "))
 }
 
-/// `text` as normalized ids (§4.4), or `None` when it holds no id or a token outside
+/// `text` as normalized ids, or `None` when it holds no id or a token outside
 /// `[A-Za-z0-9-_.:/@]` once its leading `#` is stripped.
 fn ids(text: &str) -> Option<String> {
     let mut ids: Vec<&str> = text
@@ -421,7 +421,7 @@ fn distance(a: &str, b: &str) -> usize {
 }
 
 /// Attach `before` and `after`, fill both images of every captured table, and add the one-row
-/// `answer` table (§4.4).
+/// `answer` table.
 async fn build(
     conn: &mut SqliteConnection,
     tables: &[CapturedTable],
@@ -471,7 +471,7 @@ fn image(table: &CapturedTable, image: &str, ops: &str) -> String {
     )
 }
 
-/// The spec's statements as they run (§4.3): the `where` queries of each `allow` entry, then
+/// The spec's statements as they run: the `where` queries of each `allow` entry, then
 /// the gates and the checks, each check and gate wrapped so that it is one SELECT returning at
 /// most two rows.
 struct Sql {
@@ -516,7 +516,7 @@ impl Sql {
     }
 }
 
-/// The queries that compute `W(e)` for an `allow` entry (§4.3): none without a `where`; for an
+/// The queries that compute `W(e)` for an `allow` entry: none without a `where`; for an
 /// update, one over each image, whose results are intersected.
 fn where_queries(entry: &Allow) -> Vec<String> {
     let Some(condition) = &entry.condition else { return Vec::new() };
@@ -600,7 +600,7 @@ struct Score {
     error: Option<String>,
 }
 
-/// The score of each statement (§4.3 Scoring one statement); one that fails scores 0.
+/// The score of each statement; one that fails scores 0.
 async fn scores(conn: &mut SqliteConnection, statements: &[String]) -> Vec<Score> {
     let mut scores = Vec::new();
     for sql in statements {
@@ -709,7 +709,7 @@ impl Report {
         earned / weights.sum::<f64>()
     }
 
-    /// Write `reward-details.json`, then `reward.json`, each whole or not at all (§4.5).
+    /// Write `reward-details.json`, then `reward.json`, each whole or not at all.
     fn write(&self, dir: &Path) -> Result<(), String> {
         let reward = json!({"reward": self.reward(), "harm": self.harm()});
         std::fs::create_dir_all(dir)

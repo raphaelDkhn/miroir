@@ -1,7 +1,7 @@
 //! The loopback SMTP and HTTP sinks: they record the email and requests the product sends, as
-//! `effects.jsonl` lines (§11.1 journal shapes), and answer HTTP with canned responses. A `sink`
-//! fault line is appended when the HTTP sink cannot read a request (its body is over 25 MiB)
-//! and when an email over 25 MiB is recorded truncated.
+//! `effects.jsonl` lines in the shapes `journal.rs` states, and answer HTTP with canned
+//! responses. A `sink` fault line is appended when the HTTP sink cannot read a request (its body
+//! is over 25 MiB) and when an email over 25 MiB is recorded truncated.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -456,7 +456,7 @@ mod tests {
     use crate::evidence::{self, Evidence};
 
     const LONG: Duration = Duration::from_secs(10);
-    /// The 25 MiB of §4.4, spelled out so the tests pin `MAX_MESSAGE`.
+    /// The 25 MiB the docs state, spelled out so the tests pin `MAX_MESSAGE`.
     const LIMIT: usize = 25 * 1024 * 1024;
 
     fn canned(status: u16) -> CannedResponse {

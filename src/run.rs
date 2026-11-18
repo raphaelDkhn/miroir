@@ -1,6 +1,6 @@
-//! `miroir run` (§3.5), the world image's `CMD`: boot the world, audit its listeners, write the
-//! ready marker, and supervise until SIGTERM. Bake (§3.4) reuses its datastore start, date shift
-//! and stop limit.
+//! `miroir run`, the world image's `CMD`: boot the world, audit its listeners, write the ready
+//! marker, and supervise until SIGTERM. Bake reuses its datastore start, date shift and stop
+//! limit.
 
 use std::fmt::Display;
 use std::fs::DirBuilder;

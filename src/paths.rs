@@ -1,4 +1,4 @@
-//! Where Miroir's files live: in the world image under `/miroir` (§3.3), and in the verifier.
+//! Where Miroir's files live: in the world image under `/miroir`, and in the verifier.
 
 use std::path::PathBuf;
 
