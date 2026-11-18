@@ -28,7 +28,7 @@ use serde_json::{Map, Value, json};
 use sqlx::Connection;
 
 use crate::evidence::{self, ChangeOp, NetChange};
-use crate::grade::{self, Answer, allow_line, key_condition, sql_literal};
+use crate::grade::{self, Answer, allow_line, key_condition, sql_literal, yaml_quoted};
 use crate::paths::{self, Paths};
 use crate::spec::{self, Op};
 
@@ -948,9 +948,7 @@ fn scalar(sql: &str) -> String {
         let lines: Vec<String> = sql.split('\n').map(|line| format!("      {line}")).collect();
         return format!("|-\n{}", lines.join("\n"));
     }
-    let escaped =
-        |c: char| if plain(c) { c.to_string() } else { format!("\\u{:04x}", u32::from(c)) };
-    Value::from(sql).to_string().chars().map(escaped).collect()
+    yaml_quoted(sql)
 }
 
 #[cfg(test)]

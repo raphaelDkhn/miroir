@@ -916,7 +916,7 @@ fn yaml_name(name: &str) -> String {
 
 /// `text` as a double-quoted YAML scalar: JSON's quoting, with a `\u` escape for each character
 /// JSON leaves raw but serde-saphyr refuses: DEL, the C1 controls, U+FFFE and U+FFFF.
-fn yaml_quoted(text: &str) -> String {
+pub fn yaml_quoted(text: &str) -> String {
     let refused = |c: char| c.is_control() || c == '\u{fffe}' || c == '\u{ffff}';
     let escaped =
         |c: char| if refused(c) { format!("\\u{:04x}", u32::from(c)) } else { c.to_string() };
