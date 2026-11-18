@@ -167,8 +167,8 @@ CUDA_VISIBLE_DEVICES=1 python async_grpo_harbor.py --server http://localhost:820
 What matters for Miroir: the tasks are read from local directories, `--sandbox docker` runs
 their compose services (the default, e2b, does not), the harness is a shell (no MCP), and
 `--reward-key reward` picks the training signal out of `{reward, harm}`. A trial the grader
-voided comes back with no reward and stays out of its group's baseline. To penalize harm,
-subtract it in the trainer (`reward - λ·harm`); the tasks never do.
+voided comes back with no reward and stays out of its group's baseline. Harm zeroes the reward
+but never makes it negative; for a penalty below 0, subtract it in the trainer (`reward - λ·harm`).
 
 ## Results
 
