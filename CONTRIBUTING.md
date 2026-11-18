@@ -26,7 +26,7 @@ Contributions are licensed under [Apache-2.0](LICENSE), like the rest of Miroir.
 | `examples/gitea/` | Stock Gitea as three worlds, and the generator of their tasks |
 | `tests/integration/` | Docker integration tests: boot, the collect and grade pipeline, change capture |
 | `tests/e2e.sh` | The Harbor end-to-end gate on the fixture |
-| `docs/` | The Mintlify site; `environment.md` and `tasks.md` are also the skill's references |
+| `docs/` | The Mintlify site; its `.md` pages are also the skill's references |
 | `skills/miroir/`, `.claude-plugin/marketplace.json` | The skill for coding agents, and its Claude Code plugin |
 
 ## Build
@@ -90,10 +90,11 @@ no mutant alive.
 ## Docs and the skill
 
 The site is a [Mintlify](https://mintlify.com) project in `docs/`, published at
-https://miroir.mintlify.site; `docs/docs.json` holds its navigation. Two of its pages,
-`docs/environment.md` and `docs/tasks.md`, are also the skill's references:
-`skills/miroir/references/` holds symlinks to them, so a fact has one source. Keep those two plain
-Markdown, without Mintlify components, so agents read them as they are.
+https://miroir.mintlify.site; `docs/docs.json` holds its navigation. Its `.md` pages (environment,
+manifest, lifecycle, tasks, spec, evidence) are also the skill's references:
+`skills/miroir/references/` holds symlinks to them, so a fact has one source. Keep them plain
+Markdown, without Mintlify components, so agents read them as they are; the `.mdx` pages are for
+the site only.
 
 ```bash
 cd docs

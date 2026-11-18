@@ -7,7 +7,7 @@ Include the Miroir version or commit, the world and task involved, and the steps
 the problem.
 
 What Miroir protects, and what it does not, is in the
-[security model](https://miroir.mintlify.site/environment#security-model). A way
+[security model](https://miroir.mintlify.site/lifecycle#security-model). A way
 around it is a vulnerability. Bugs in the sample products under `fixtures/` and `examples/` are
 not, unless they get an agent past the model. A grader an agent can fool is a bug: open an issue.
 

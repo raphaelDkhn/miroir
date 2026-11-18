@@ -56,15 +56,15 @@
     "groups": [
       {
         "group": "Getting started",
-        "pages": ["index", "quick-start"]
-      },
-      {
-        "group": "Core concepts",
-        "pages": ["core-concepts"]
+        "pages": ["index", "quick-start", "core-concepts"]
       },
       {
         "group": "Guides",
-        "pages": ["environment", "tasks", "validate", "train"]
+        "pages": ["environment", "tasks", "validate", "publish", "train"]
+      },
+      {
+        "group": "Reference",
+        "pages": ["manifest", "lifecycle", "spec", "evidence"]
       }
     ]
   }

@@ -1,41 +1,19 @@
 ---
 title: "Core concepts"
-description: "What Miroir adds to Harbor's tasks, trials and jobs."
+description: "What happens during a trial, and the few terms the rest of the docs rely on."
 ---
 
-Miroir adds these concepts to Harbor's
-[tasks, trials and jobs](https://docs.harborframework.com/core-concepts):
+Miroir builds on Harbor's [tasks, trials and jobs](https://docs.harborframework.com/core-concepts).
+This page follows one trial from start to finish, then defines the terms the other pages use.
 
-## World image
+## A trial
 
-The world image is the product, Miroir and a seeded world, baked at `docker build`. Harbor runs
-it as a service next to the agent's container. See [Wrap a product](/environment).
+A trial is one agent's attempt at one task. Harbor starts three fresh containers for it, and
+removes them afterwards:
 
-## Evidence
-
-The evidence is what one episode changed and sent: one SQLite file per trial. See
-[What checks read](/tasks#what-checks-read).
-
-## Spec
-
-The spec is how to grade that evidence: SQL checks, gates and the changes in scope, in the task's
-`[verifier.env] MIROIR_SPEC`. See [The grading spec](/tasks#the-grading-spec).
-
-## Probe
-
-A probe is a wrong solution with the reward bounds and the harm it must get. A grader is valid
-when the reference solution, doing nothing and every probe score what they must. See
-[Validate and publish](/validate).
-
-## Void
-
-A void is a trial Miroir failed to grade, such as one with no evidence or a broken spec: it gets
-no reward, and Harbor leaves it out of its means. See [Outcomes](/validate#outcomes).
-
-## Trial
-
-A trial is one agent's attempt at one task, in fresh containers that Harbor removes afterwards.
-A Miroir trial has three: `main`, where the agent runs, the world, and the verifier.
+- `main`, where the agent runs;
+- the world, where the product runs with its data;
+- the verifier, where the grader runs.
 
 ```mermaid
 sequenceDiagram
@@ -57,19 +35,65 @@ sequenceDiagram
   V-->>H: reward and harm
 ```
 
-The agent reaches the product only on the ports the world exposes, like any API client, and never
-shares a container with the database, the evidence or the grader. The product cannot reach the
-internet: its email and HTTP calls land in Miroir's recorders.
+The agent reaches the product the way any API client would: over the network, on the ports the
+world exposes. It never shares a container with the database, the evidence or the grader. The
+product, in turn, cannot reach the internet. The emails and HTTP calls it sends land in Miroir's
+recorders, where the grader can read them.
+
+## World image
+
+The world image is your product's own image, plus Miroir and a world: the data the product starts
+every trial with. The world is seeded once, at `docker build`, and every trial boots a fresh copy,
+with its dates moved to the trial's day. Harbor runs the image as a service next to the agent's
+container. See [Wrap a product](/environment).
+
+## Evidence
+
+The evidence is what one trial changed and sent, in one SQLite file: the rows that changed in the
+product's database, the emails and HTTP requests the product sent, and faults such as a crashed
+process. See [Evidence](/evidence).
+
+## Spec
+
+The spec says how to grade the evidence. It lives in the task's `task.toml`, as
+`[verifier.env] MIROIR_SPEC`, and has three parts:
+
+- **checks**, SQL queries that measure how much of the task got done;
+- **gates**, SQL conditions that must hold, such as "no email was sent";
+- **allow**, the changes the task is allowed to make.
+
+See [Grading spec](/spec).
+
+## Reward and harm
+
+Every graded trial gets two numbers. `reward`, from 0 to 1, is the weighted mean of the check
+scores.
+`harm` is 1 when the trial did damage: a change no `allow` entry admits, a failed gate, or a
+fault. Harm sets the reward to 0.
+
+## Probe
+
+A probe is a deliberately wrong solution, such as one that also charges another customer, with the
+reward bounds and the harm it must get. Probes test the grader. A grader is valid when the
+reference solution scores reward 1 and harm 0, doing nothing scores 0 and 0, and every probe stays
+within its reward bounds and gets the harm it declares. See [Validate graders](/validate).
+
+## Void
+
+A void is a trial Miroir failed to grade, such as one with no evidence or a broken spec. It gets no
+reward at all, and Harbor leaves it out of its means. Only Miroir's own failures void a trial:
+anything the agent can influence is scored. See [Outcomes](/spec#outcomes).
 
 ## Commands
 
-`miroir` is one static Linux binary:
+`miroir` is one static Linux binary. `bake`, `run`, `collect` and `grade` run in containers;
+`check` and `draft` run on your machine, from the Miroir image.
 
-| Command | Runs | Does |
+| Command | When it runs | What it does |
 |---|---|---|
-| [`bake`](/environment#bake-run-miroir-bake-at-docker-build) | At the world image's `docker build` | Seeds the product and installs change capture |
-| [`run`](/environment#boot-miroir-run-once-per-trial) | As the world's container command | Boots the product, moves its dates to today, and records the email and HTTP calls it sends |
-| [`collect`](/environment#collect-the-collect-hook-after-main-has-stopped) | In Harbor's [collect hook](https://docs.harborframework.com/jobs/artifact-collection), after the agent stops | Writes the evidence |
-| [`grade`](/tasks#how-grading-runs) | In Harbor's [separate verifier](https://docs.harborframework.com/tasks/separate-verifier) | Scores the evidence against the spec |
-| [`check`](/validate#miroir-check) | On the host | Validates graders and summarizes agent runs |
-| [`draft`](/tasks#draft-a-spec-from-reference-runs) | On the host | Drafts a spec from reference runs |
+| [`bake`](/lifecycle#bake) | At the world image's `docker build` | Seeds the product and installs change capture |
+| [`run`](/lifecycle#boot) | As the world container's command | Boots the product, moves its dates to today, and records the emails and HTTP calls it sends |
+| [`collect`](/lifecycle#collect) | In Harbor's [collect hook](https://docs.harborframework.com/jobs/artifact-collection), after the agent stops | Writes the evidence |
+| [`grade`](/spec#how-grading-runs) | In Harbor's [separate verifier](https://docs.harborframework.com/tasks/separate-verifier) | Scores the evidence against the spec |
+| [`check`](/validate) | On your machine | Validates graders and summarizes agent runs |
+| [`draft`](/tasks#draft-the-spec) | On your machine | Drafts a spec from reference runs |

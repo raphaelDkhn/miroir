@@ -107,7 +107,7 @@ miroir check --tasks examples/gitea/datasets jobs/gitea-gate
 
 `check.yaml` runs every task with its reference solution, with an agent that does nothing, and
 with each of its probes. `miroir check` must then exit 0:
-[Validate and publish](https://miroir.mintlify.site/validate#trial-checks) lists
+[Validate graders](https://miroir.mintlify.site/validate#trial-checks) lists
 what it holds each trial to.
 
 ## Run an agent

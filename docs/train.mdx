@@ -1,10 +1,10 @@
 ---
 title: "Train"
-description: "The reward contract, calibration, and the trainers that run Miroir tasks."
+description: "The reward contract, how to pick the tasks worth training on, and the trainers that run Miroir tasks."
 ---
 
-Miroir adds no training code. Every trainer below runs Harbor task directories itself; what
-Miroir gives it is the reward contract, voids it can recognize, and calibration with
+Miroir adds no training code: every trainer below runs Harbor task directories itself. What Miroir
+gives a trainer is a reward contract, voids it can recognize, and calibration with
 `miroir check`.
 
 ## The reward contract
@@ -15,13 +15,13 @@ The grader writes `/logs/verifier/reward.json` with two keys, always both, finit
 {"harm": 1, "reward": 0.0}
 ```
 
-- `reward`, in [0, 1], is the training signal: the weighted mean of the task's check scores, or
+- `reward`, from 0 to 1, is the training signal: the weighted mean of the task's check scores, or
   0 when there is harm.
 - `harm`, 0 or 1, is a metric: a change no `allow` entry admits, a failed gate, or a fault. Its
   mean over a job is the harm rate.
 - A void writes no reward file and exits 75. Harbor records an invalid trial, and a trainer must
-  leave it out of the batch, not count it as 0. A trial voids only for Miroir's own failures,
-  such as a broken spec or missing evidence ([Outcomes](/validate#outcomes)).
+  leave it out of the batch, not count it as 0. A trial voids only for Miroir's own failures, such
+  as a broken spec or missing evidence ([Outcomes](/spec#outcomes)).
 - `reward-details.json`, next to it, holds every check's score and the out-of-scope changes.
 
 Harm zeroes `reward` but never makes it negative. A trainer that wants a penalty below 0 composes
@@ -29,8 +29,8 @@ Harm zeroes `reward` but never makes it negative. A trainer that wants a penalty
 
 ## Calibrate
 
-Before training, run the agent and model to be trained on the train split with at least two
-attempts per task, then keep the tasks whose rewards differ between attempts:
+Before training, run the agent and model you will train on the train split, with at least two
+attempts per task. Then keep the tasks whose rewards differ between attempts:
 
 ```bash
 miroir check --json jobs/<job> | jq -r '.agents[].tasks[] | select(.class == "learnable") | .task'
@@ -60,24 +60,39 @@ What matters to Miroir in it:
 - `--sandbox docker` runs their compose services (the default, e2b, does not);
 - the harness is a shell, with no MCP;
 - `--reward-key reward` picks the training signal out of `{reward, harm}`;
-- a rollout the verifier did not score comes back as `None`, which keeps voids out of the
-  group's baseline. The example adds its own shaping on top: up to 0.3 for few tool calls on a
-  fully solved task.
+- a rollout the verifier did not score comes back as `None`, which keeps voids out of the group's
+  baseline.
+
+The example adds its own shaping on top: up to 0.3 for few tool calls on a fully solved task.
 
 ## Consumers
+
+**Expected** means it should work but has not been run yet. **Unsupported** comes from reading
+each consumer's source; none of those was run.
 
 | Consumer | Status | Notes |
 |---|---|---|
 | Harbor (`harbor run`, local Docker) | verified | The fixture's gate, `tests/e2e.sh`: grader validation, regrade, a void. |
-| OpenEnv `harbor_env` → TRL `AsyncGRPOTrainer` | expected, not yet run (the committed recipe) | A void comes back as `reward=None`, which TRL leaves out of the group's statistics. |
-| SkyRL `HarborGenerator` / `harbor_skycap` | expected, not yet run | Trains on `rewards["reward"]`. A void has no verifier result: it is retried, then masks its prompt group. |
-| Tinker or Miles through `harbor serve` and Harbor's inference relay | expected, not yet run | Works at the trial level. |
-| verifiers `HarborTaskset` → prime-rl, local Docker runtime | expected, not yet run | Loads Harbor Hub packages only, so publish the split first (private works with Hub credentials). Set `agent.deployment.trust_compose = true`, use the `bash` harness, and use a Docker Compose with `config --no-env-resolution` (2.35.0 or later). `reward_key` defaults to `reward`, and `harm` becomes a metric. Collect hooks are strict, and `miroir collect` exits 0 whenever it writes evidence. The artifact budget is 32 MiB per trial, shared with `main`'s `/logs/artifacts`; evidence is capped at 16 MiB. |
+| OpenEnv `harbor_env` → TRL `AsyncGRPOTrainer` | expected | The committed recipe. A void comes back as `reward=None`, which TRL leaves out of the group's statistics. |
+| SkyRL `HarborGenerator` / `harbor_skycap` | expected | Trains on `rewards["reward"]`. A void has no verifier result: it is retried, then masks its prompt group. |
+| Tinker or Miles through `harbor serve` and Harbor's inference relay | expected | Works at the trial level. |
+| verifiers `HarborTaskset` → prime-rl, local Docker runtime | expected | Needs a published split and a few settings ([below](#verifiers-harbortaskset)). |
 | verifiers Prime native compose (one VM per service) | unsupported | The VM's own listeners fail the boot's listener audit. |
 | Prime Hosted Training | unsupported | Its environment servers have no Docker, so compose tasks cannot run. |
 | TRL `trl.experimental.harbor` (white box) | unsupported | It verifies in the agent's container and never runs collect hooks. |
 | NeMo Gym `harbor` server | unsupported | It rejects `internal: true` networks outside OpenSandbox. |
 | Tinker cookbook `harbor_rl` | unsupported | It runs Dockerfile-only tasks. |
 
-"Unsupported" comes from reading each consumer's source; none of those was run. Whether training
-on the Gitea train split improves held-out work is the Gitea example's open claim.
+Whether training on the Gitea train split improves held-out work is the Gitea example's open
+claim.
+
+### verifiers HarborTaskset
+
+- It loads Harbor Hub packages only, so publish the split first. A private split works with Hub
+  credentials.
+- Set `agent.deployment.trust_compose = true`, use the `bash` harness, and use a Docker Compose
+  with `config --no-env-resolution` (2.35.0 or later).
+- `reward_key` defaults to `reward`, and `harm` becomes a metric.
+- Collect hooks are strict, and `miroir collect` exits 0 whenever it writes evidence.
+- The artifact budget is 32 MiB per trial, shared with `main`'s `/logs/artifacts`. Evidence is
+  capped at 16 MiB.
