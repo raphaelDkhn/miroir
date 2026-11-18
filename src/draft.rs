@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, anyhow, bail};
-use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
 use sqlx::Connection;
 
@@ -58,14 +57,17 @@ pub struct DraftArgs {
 
 /// Print a draft spec to `out`. `Ok(true)` when a draft was printed, `Ok(false)` when there is
 /// nothing to draft (then `out` gets a comment saying why); an error is a usage or I/O error.
-pub fn run(args: &DraftArgs, out: &mut impl std::io::Write) -> anyhow::Result<bool> {
+pub async fn run(args: &DraftArgs, out: &mut impl std::io::Write) -> anyhow::Result<bool> {
     if args.inputs.is_empty() {
         bail!(
             "nothing to draft from: pass the Harbor trial directories of one task, or \
              evidence.db files"
         );
     }
-    let runs = read_all(&args.inputs)?;
+    let mut runs = Vec::new();
+    for input in &args.inputs {
+        runs.push(read(input).await?);
+    }
     distinct(&runs)?;
     let task = task(&runs)?;
     let draft = Draft::of(&runs);
@@ -97,24 +99,6 @@ struct Run {
     answer: Answer,
     /// The kind and detail of each fault.
     faults: Vec<(String, String)>,
-}
-
-/// Read every input on a runtime of its own, in a thread of its own: the command line calls `run`
-/// from inside its runtime, where blocking on another runtime would panic.
-fn read_all(inputs: &[PathBuf]) -> anyhow::Result<Vec<Run>> {
-    std::thread::scope(|scope| {
-        let reader = scope.spawn(|| -> anyhow::Result<Vec<Run>> {
-            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-            runtime.block_on(async {
-                let mut runs = Vec::new();
-                for input in inputs {
-                    runs.push(read(input).await?);
-                }
-                Ok(runs)
-            })
-        });
-        reader.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-    })
 }
 
 /// Read one input: a Harbor trial directory, or an `evidence.db` file.
@@ -282,23 +266,14 @@ fn change((tbl, op, pk, before, after, columns): ChangeRow) -> serde_json::Resul
     })
 }
 
-/// A JSON object of the evidence, with each value as a check must write it to equal what the
-/// grader's `json_extract` reads. The `serde_json` parser can land a bit off a float, which would
-/// then print as other text, so a float is parsed by the standard library and prints back as the
-/// text the evidence holds. A nested object or array keeps its text, which a check compares.
+/// A JSON object of the evidence, with each nested object or array as its text: the grader's
+/// `json_extract` reads it as text, so a check compares text, and runs differ where it does.
 fn exact(text: &str) -> serde_json::Result<Map<String, Value>> {
-    let raw: BTreeMap<String, Box<RawValue>> = serde_json::from_str(text)?;
-    let mut object = Map::new();
-    for (column, raw) in raw {
-        let text = raw.get();
-        let value = match serde_json::from_str(text)? {
-            Value::Number(number) if number.is_f64() => {
-                text.parse::<f64>().map_or(Value::Number(number), Value::from)
-            }
-            Value::Object(_) | Value::Array(_) => Value::String(text.to_owned()),
-            value @ (Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)) => value,
-        };
-        object.insert(column, value);
+    let mut object: Map<String, Value> = serde_json::from_str(text)?;
+    for value in object.values_mut() {
+        if value.is_array() || value.is_object() {
+            *value = Value::String(value.to_string());
+        }
     }
     Ok(object)
 }
@@ -570,10 +545,20 @@ fn split(group: &[&Item]) -> (Map<String, Value>, Vec<String>) {
 struct Draft {
     /// The name and SQL of each check.
     checks: Vec<(String, String)>,
+    /// The names in `checks`.
+    names: BTreeSet<String>,
+    /// The SQL in `checks`.
+    drafted: BTreeSet<String>,
+    /// The last suffix each base name was tried with, so that naming resumes after it.
+    suffixes: BTreeMap<String, usize>,
     /// The paste-ready `allow` lines, in evidence order.
     allow: Vec<String>,
+    /// The lines in `allow`.
+    allowed: BTreeSet<String>,
     /// What only some runs did, and what is checked or allowed whatever its values.
     notes: Vec<String>,
+    /// The notes in `notes`.
+    noted: BTreeSet<String>,
     /// `table.column` for each value that differs between runs.
     varying: BTreeSet<String>,
     /// `table.column` for each value that is the key of a row a run inserted, with its tables.
@@ -735,32 +720,31 @@ impl Draft {
 
     /// Add a check named after `words`, unless a check with the same SQL is drafted.
     fn check(&mut self, words: &str, sql: String) {
-        if self.checks.iter().any(|(_, drafted)| *drafted == sql) {
+        if !self.drafted.insert(sql.clone()) {
             return;
         }
         let base = name(words);
         let mut name = base.clone();
-        let mut n = 1;
+        let n = self.suffixes.entry(base.clone()).or_insert(1);
         // `null`, `true` and `false` would read back from the YAML as no name at all.
-        while ["null", "true", "false"].contains(&name.as_str())
-            || self.checks.iter().any(|(other, _)| *other == name)
-        {
-            n += 1;
+        while ["null", "true", "false"].contains(&name.as_str()) || self.names.contains(&name) {
+            *n += 1;
             name = format!("{base}_{n}");
         }
+        self.names.insert(name.clone());
         self.checks.push((name, sql));
     }
 
     /// Add an `allow` line, unless the same line is drafted.
     fn allow(&mut self, line: String) {
-        if !self.allow.contains(&line) {
+        if self.allowed.insert(line.clone()) {
             self.allow.push(line);
         }
     }
 
     /// Add a note, unless the same note is there.
     fn note(&mut self, note: String) {
-        if !self.notes.contains(&note) {
+        if self.noted.insert(note.clone()) {
             self.notes.push(note);
         }
     }
@@ -1125,16 +1109,16 @@ mod tests {
     }
 
     /// What `run` returned for `inputs`, and what it printed.
-    fn drafted(inputs: &[&Path]) -> (anyhow::Result<bool>, String) {
+    async fn drafted(inputs: &[&Path]) -> (anyhow::Result<bool>, String) {
         let args = DraftArgs { inputs: inputs.iter().map(|input| input.to_path_buf()).collect() };
         let mut out = Vec::new();
-        let result = run(&args, &mut out);
+        let result = run(&args, &mut out).await;
         (result, String::from_utf8(out).unwrap())
     }
 
     /// The error `run` returned for `inputs`, which printed nothing.
-    fn refused(inputs: &[&Path]) -> String {
-        let (result, printed) = drafted(inputs);
+    async fn refused(inputs: &[&Path]) -> String {
+        let (result, printed) = drafted(inputs).await;
         assert_eq!(printed, "");
         format!("{:#}", result.unwrap_err())
     }
@@ -1159,7 +1143,7 @@ mod tests {
     /// The draft of `inputs`, once the contract (B1) holds for it: it parses as a spec, and
     /// grading each input's own evidence with it scores reward 1 and harm 0.
     async fn contract(inputs: &[&Path]) -> String {
-        let (result, text) = drafted(inputs);
+        let (result, text) = drafted(inputs).await;
         assert!(result.unwrap(), "{text}");
         spec::parse(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
         for input in inputs {
@@ -1516,8 +1500,9 @@ mod tests {
         );
     }
 
-    /// The `serde_json` parser reads the evidence's `1.5220476764550182e-202` one bit off, as the
-    /// float written `1.522047676455018e-202`, which SQLite reads as another number.
+    /// Without its `float_roundtrip` feature, the `serde_json` parser reads the evidence's
+    /// `1.5220476764550182e-202` one bit off, as the float written `1.522047676455018e-202`, which
+    /// SQLite reads as another number.
     #[tokio::test]
     async fn floats_are_checked_with_the_text_the_evidence_holds() {
         let dir = new_dir();
@@ -1534,6 +1519,21 @@ mod tests {
         let values = "nested = '{\"x\":[1.5220476764550182e-202]}' \
                       AND x = 1.5220476764550182e-202 AND y = 0.1\n";
         assert!(text.contains(values), "{text}");
+    }
+
+    /// `[0.0]` and `[-0.0]` are equal JSON values but differ as the text a check compares, and a
+    /// nested value over 256 bytes is left out like long text.
+    #[tokio::test]
+    async fn nested_values_are_compared_and_measured_as_their_text() {
+        let dir = new_dir();
+        let meta = json!({"k": "x".repeat(CHECKED_BYTES)});
+        let row =
+            |v| evidence(vec![insert("rates", json!({"id": 1, "v": v, "meta": meta}))], vec![]);
+        let a = trial(&dir, PAY, &row(json!([0.0])), None).await;
+        let b = trial(&dir, PAY, &row(json!([-0.0])), None).await;
+        let text = contract(&[&a, &b]).await;
+        assert!(text.contains("# varies across runs: rates.v\n"), "{text}");
+        assert!(text.contains("# not checked, over 256 bytes: rates.meta\n"), "{text}");
     }
 
     #[tokio::test]
@@ -1578,7 +1578,7 @@ mod tests {
         let idle = evidence(Vec::new(), Vec::new());
         let a = trial(&dir, PAY, &idle, None).await;
         let b = trial(&dir, PAY, &idle, Some("  \n")).await;
-        let (result, printed) = drafted(&[&a, &b]);
+        let (result, printed) = drafted(&[&a, &b]).await;
         assert!(!result.unwrap());
         let nothing =
             "# nothing to draft: no run changed a row, sent an email or a request, or answered\n";
@@ -1593,7 +1593,7 @@ mod tests {
         };
         let a = trial(&dir, PAY, &pay(4001), None).await;
         let b = trial(&dir, PAY, &pay(4002), None).await;
-        let (result, printed) = drafted(&[&a, &b]);
+        let (result, printed) = drafted(&[&a, &b]).await;
         assert!(!result.unwrap());
         assert_eq!(
             printed,
@@ -1612,7 +1612,7 @@ mod tests {
         };
         let a = trial(&dir, PAY, &touch("2026-11-17T10:00:00+00:00"), None).await;
         let b = trial(&dir, PAY, &touch("2026-11-17T10:00:01+00:00"), None).await;
-        let (result, printed) = drafted(&[&a, &b]);
+        let (result, printed) = drafted(&[&a, &b]).await;
         assert!(!result.unwrap());
         assert_eq!(
             printed,
@@ -1744,7 +1744,7 @@ mod tests {
         std::os::unix::fs::symlink(dir.join("elsewhere.txt"), linked.join(ANSWER)).unwrap();
         let folder = trial(&dir, PAY, &idle, None).await;
         std::fs::create_dir_all(folder.join(ANSWER)).unwrap();
-        let (result, printed) = drafted(&[&linked, &folder]);
+        let (result, printed) = drafted(&[&linked, &folder]).await;
         assert!(!result.unwrap(), "{printed}");
         assert!(printed.starts_with("# nothing to draft: no run changed"), "{printed}");
     }
@@ -1836,7 +1836,7 @@ mod tests {
         broken.faults.push(Fault { kind: "crash".into(), detail: "web exited\nwith 1".into() });
         let a = trial(&dir, PAY, &broken, None).await;
         let b = trial(&dir, PAY, &paid("2026-11-17T10:00:00+00:00"), None).await;
-        let (result, text) = drafted(&[&a, &b]);
+        let (result, text) = drafted(&[&a, &b]).await;
         assert!(result.unwrap(), "{text}");
         let harm = format!(
             "# {} is harm whatever the spec says: deals truncate; notes schema; \
@@ -2112,19 +2112,19 @@ mod tests {
         for (edit, problem) in cases {
             let other = trial(&dir, PAY, &run, None).await;
             rewrite(&other, edit);
-            assert_eq!(refused(&[&other]), refusal(&other, problem));
+            assert_eq!(refused(&[&other]).await, refusal(&other, problem));
             contract(&[&other.join(EVIDENCE)]).await;
         }
         let failed = trial(&dir, PAY, &run, None).await;
         std::fs::create_dir_all(failed.join("agent")).unwrap();
         std::fs::write(failed.join("agent/exit-code.txt"), "1\n").unwrap();
         let problem = "the solution exited with 1 (agent/exit-code.txt)";
-        assert_eq!(refused(&[&failed]), refusal(&failed, problem));
+        assert_eq!(refused(&[&failed]).await, refusal(&failed, problem));
         std::fs::write(failed.join("agent/exit-code.txt"), "0").unwrap();
         contract(&[&failed]).await;
         let unreadable = trial(&dir, PAY, &run, None).await;
         std::fs::create_dir_all(unreadable.join("agent/exit-code.txt")).unwrap();
-        let error = refused(&[&unreadable]);
+        let error = refused(&[&unreadable]).await;
         let file = unreadable.join("agent/exit-code.txt");
         assert!(error.starts_with(&format!("cannot read {}: ", file.display())), "{error}");
         let voided = trial(&dir, PAY, &run, None).await;
@@ -2144,11 +2144,11 @@ mod tests {
             let (first, second) = (first.display(), second.display());
             format!("{first} and {second} are the same run: draft from different trials")
         };
-        assert_eq!(refused(&[&a, &b, &a]), twice(&a, &a));
+        assert_eq!(refused(&[&a, &b, &a]).await, twice(&a, &a));
         let evidence = a.join(EVIDENCE);
-        assert_eq!(refused(&[&evidence, &b, &a]), twice(&evidence, &a));
+        assert_eq!(refused(&[&evidence, &b, &a]).await, twice(&evidence, &a));
         let spelled = dir.join(".").join(a.file_name().unwrap());
-        assert_eq!(refused(&[&a, &spelled]), twice(&a, &spelled));
+        assert_eq!(refused(&[&a, &spelled]).await, twice(&a, &spelled));
     }
 
     #[tokio::test]
@@ -2158,7 +2158,7 @@ mod tests {
         let a = trial(&dir, PAY, &run, None).await;
         let b = file(&dir, &run).await;
         let c = trial(&dir, "acme/close-won-deal", &run, None).await;
-        let error = refused(&[&a, &b, &c]);
+        let error = refused(&[&a, &b, &c]).await;
         let expected = format!(
             "{} is a trial of acme/pay-invoice, but {} is a trial of acme/close-won-deal: draft \
              from the trials of one task",
@@ -2172,23 +2172,25 @@ mod tests {
     async fn missing_and_foreign_inputs_are_refused() {
         let dir = new_dir();
         let missing = dir.join("evidence.db");
-        let error = refused(&[&missing]);
+        let error = refused(&[&missing]).await;
         assert!(error.starts_with(&format!("cannot read the evidence {}: ", missing.display())));
         let empty = dir.join("empty-trial");
         std::fs::create_dir_all(&empty).unwrap();
-        let error = refused(&[&empty]);
+        let error = refused(&[&empty]).await;
         assert!(error.starts_with(&format!("{} is not a Harbor trial directory", empty.display())));
         let collected = trial(&dir, PAY, &paid("2026-11-17T10:00:00+00:00"), None).await;
         std::fs::remove_file(collected.join(EVIDENCE)).unwrap();
-        let error = refused(&[&collected]);
+        let error = refused(&[&collected]).await;
         let evidence = collected.join(EVIDENCE);
         assert!(error.starts_with(&format!("cannot read the evidence {}", evidence.display())));
         std::fs::write(collected.join("result.json"), "{\"trial_name\": \"t\"}").unwrap();
-        assert!(refused(&[&collected]).ends_with("names no task_name: is it a Harbor trial's?"));
+        assert!(
+            refused(&[&collected]).await.ends_with("names no task_name: is it a Harbor trial's?")
+        );
         std::fs::write(collected.join("result.json"), "{").unwrap();
-        assert!(refused(&[&collected]).contains("result.json is not JSON"));
+        assert!(refused(&[&collected]).await.contains("result.json is not JSON"));
         assert_eq!(
-            refused(&[]),
+            refused(&[]).await,
             "nothing to draft from: pass the Harbor trial directories of one task, or \
              evidence.db files"
         );
@@ -2205,11 +2207,11 @@ mod tests {
             .await
             .unwrap();
         conn.close().await.unwrap();
-        let error = refused(&[&path]);
+        let error = refused(&[&path]).await;
         assert!(error.contains("is evidence format 2, written by miroir 0.1.0"), "{error}");
         let text = dir.join("notes.txt");
         std::fs::write(&text, "not a database").unwrap();
-        assert!(refused(&[&text]).contains("is not Miroir evidence"));
+        assert!(refused(&[&text]).await.contains("is not Miroir evidence"));
     }
 
     #[tokio::test]
@@ -2220,7 +2222,7 @@ mod tests {
         let mut conn = sqlx::SqliteConnection::connect_with(&options).await.unwrap();
         sqlx::raw_sql("UPDATE changes SET op = 'upsert'").execute(&mut conn).await.unwrap();
         conn.close().await.unwrap();
-        let error = refused(&[&path]);
+        let error = refused(&[&path]).await;
         assert!(error.contains("unknown variant `upsert`"), "{error}");
     }
 
@@ -2229,7 +2231,7 @@ mod tests {
         let dir = new_dir();
         let note = |n: i64| insert("notes", json!({"id": n, "deal_id": 1100 + n, "text": "x"}));
         let a = trial(&dir, PAY, &evidence((0..300).map(note).collect(), Vec::new()), None).await;
-        let error = refused(&[&a]);
+        let error = refused(&[&a]).await;
         assert!(error.starts_with("the draft is not a valid spec, so it is not printed: the spec"));
     }
 
@@ -2287,8 +2289,12 @@ mod tests {
         for (words, sql) in [("null", "SELECT 4"), ("true", "SELECT 5"), ("False", "SELECT 6")] {
             draft.check(words, sql.into());
         }
+        for (words, sql) in [("a b 4", "SELECT 7"), ("a b", "SELECT 8")] {
+            draft.check(words, sql.into());
+        }
         let names: Vec<&str> = draft.checks.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, ["a_b", "a_b_2", "a_b_3", "null_2", "true_2", "false_2"]);
+        let expected = ["a_b", "a_b_2", "a_b_3", "null_2", "true_2", "false_2", "a_b_4", "a_b_5"];
+        assert_eq!(names, expected);
     }
 
     #[test]
@@ -2461,7 +2467,7 @@ mod tests {
                 }
                 let a = trial(&dir, PAY, &first, answer.as_deref()).await;
                 let b = trial(&dir, PAY, &second, answer.as_deref()).await;
-                let (result, text) = drafted(&[&a, &b]);
+                let (result, text) = drafted(&[&a, &b]).await;
                 if result.unwrap() {
                     spec::parse(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
                     assert!(!text.contains("'''"), "{text}");
