@@ -144,7 +144,7 @@ uv run examples/gitea/tasks.py …           # the command above
 harbor job regrade jobs/gitea-eval -p examples/gitea/datasets/test --job-name gitea-eval-2
 ```
 
-Regrading reuses the trials' evidence, so it takes seconds and runs no agent. `VERSION` in
+Regrading reuses the trials' evidence, so it runs only the verifiers and no agent. `VERSION` in
 `tasks.py` is every task's version: bump the minor for a grading change, which Harbor regrades;
 the major for an instruction or world change, which it reruns; the patch for solutions, probes
 and notes, which it reuses. `harbor run --diff jobs/gitea-eval …` then does the least work.

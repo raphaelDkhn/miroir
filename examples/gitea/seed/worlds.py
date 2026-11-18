@@ -81,7 +81,6 @@ class Repo:
     areas: list[str]
     nouns: list[Noun]
     release: Release | None = None
-    incidents: bool = False
 
     @property
     def catch_all(self) -> str:
@@ -101,8 +100,6 @@ class Scheme:
     needs_triage: str
     blocked: str
     area: str  # the scope of area labels, such as "area"
-    incident_active: str
-    incident_resolved: str
 
     def labels(self, repo: Repo) -> list[tuple[str, str, str, bool]]:
         """A repository's labels: (name, color, description, exclusive)."""
@@ -120,11 +117,6 @@ class Scheme:
             (self.blocked, "5319e7", "Blocked by other work", False),
         ]
         rows += [(f"{self.area}/{area}", "c5def5", "", False) for area in repo.areas]
-        if repo.incidents:
-            rows += [
-                (self.incident_active, "e11d21", "An incident in progress", True),
-                (self.incident_resolved, "006b75", "A resolved incident", True),
-            ]
         return rows
 
 
@@ -378,15 +370,6 @@ def nouns(*pairs: str) -> list[Noun]:
     return [Noun(*pair.split("/")) for pair in pairs]
 
 
-RUNBOOK = """\
-# Incidents
-
-1. The on-call engineer opens an issue titled `INCIDENT: ...` with the label `{active}`.
-2. Once they say it is mitigated, close the issue and swap `{active}` for `{resolved}`.
-3. The postmortem follows within five working days.
-"""
-
-
 ORBIT_PEOPLE = [
     staff("dana", "Dana Lee", "manager"),
     staff("marcus", "Marcus Webb", "engineer", "backend", "oncall"),
@@ -502,7 +485,7 @@ ORBIT_REPOS = [
     ),
     Repo(
         "infra",
-        "Terraform, Kubernetes manifests and runbooks",
+        "Terraform and Kubernetes manifests",
         "infra",
         True,
         {
@@ -519,7 +502,6 @@ ORBIT_REPOS = [
             "node pool/node pools",
             "DNS record/DNS records",
         ),
-        incidents=True,
     ),
     Repo(
         "payments-gateway",
@@ -573,8 +555,6 @@ ORBIT_SCHEME = Scheme(
     "status/needs-triage",
     "status/blocked",
     "area",
-    "incident/active",
-    "incident/resolved",
 )
 
 
@@ -728,7 +708,7 @@ FERRY_REPOS = [
     ),
     Repo(
         "platform",
-        "Terraform, Kubernetes manifests and runbooks",
+        "Terraform and Kubernetes manifests",
         "infra",
         True,
         {
@@ -743,7 +723,6 @@ FERRY_REPOS = [
             "queue/queues",
             "database replica/database replicas",
         ),
-        incidents=True,
     ),
     Repo(
         "handbook",
@@ -776,8 +755,6 @@ FERRY_SCHEME = Scheme(
     "triage/new",
     "triage/blocked",
     "area",
-    "outage/ongoing",
-    "outage/resolved",
 )
 
 
@@ -935,7 +912,7 @@ KESTREL_REPOS = [
     ),
     Repo(
         "cloud",
-        "Terraform, Helm charts and runbooks",
+        "Terraform and Helm charts",
         "infra",
         True,
         {
@@ -950,7 +927,6 @@ KESTREL_REPOS = [
             "backup/backups",
             "VPN tunnel/VPN tunnels",
         ),
-        incidents=True,
     ),
     Repo(
         "api-docs",
@@ -983,8 +959,6 @@ KESTREL_SCHEME = Scheme(
     "state/untriaged",
     "state/blocked",
     "component",
-    "incident/open",
-    "incident/closed",
 )
 
 
@@ -1021,12 +995,8 @@ def world(
     repos: list[Repo],
     scheme: Scheme,
 ) -> World:
-    """A world, with copies of its repositories that add their runbook and CODEOWNERS."""
+    """A world, with copies of its repositories that add their CODEOWNERS."""
     repos = [dataclasses.replace(repo, files=dict(repo.files)) for repo in repos]
-    for repo in repos:
-        if repo.incidents:
-            active, resolved = scheme.incident_active, scheme.incident_resolved
-            repo.files["runbooks/incidents.md"] = RUNBOOK.format(active=active, resolved=resolved)
     built = World(
         name,
         org,
@@ -1266,9 +1236,9 @@ class Titles:
 def background(world: World, rng: random.Random, titles: Titles) -> None:
     """The issues nothing asks about, by repository: labeled, assigned, discussed, some closed.
 
-    None waits on its reporter or for triage, has a top priority or an incident label, is a pull
-    request or sits in a release milestone, and none open is assigned to a reserved person: the
-    plants own those, and the tasks count them exactly.
+    None waits on its reporter or for triage, has a top priority, is a pull request or sits in a
+    release milestone, and none open is assigned to a reserved person: the plants own those, and
+    the tasks count them exactly.
     """
     scheme = world.scheme
     for repo in world.repos.values():

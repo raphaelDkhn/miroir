@@ -1,4 +1,4 @@
-//! Change capture on the fixture's real Postgres (§3.6, §4.4): what reaches `changes`, and what
+//! Change capture on the fixture's real Postgres: what reaches `changes`, and what
 //! the grader makes of it.
 
 use std::time::{Duration, Instant};

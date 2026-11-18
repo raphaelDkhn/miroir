@@ -1,5 +1,5 @@
 //! A trial without Harbor: a task's solution against a booted world, then `miroir collect` in
-//! the world, then `miroir grade` in the grader image (§3.2).
+//! the world, then `miroir grade` in the grader image.
 
 use serde_json::json;
 

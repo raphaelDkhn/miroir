@@ -28,7 +28,7 @@ jobs:
       - name: Build the static binaries
         run: |
           for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
-            uvx --from cargo-zigbuild==0.24.0 cargo-zigbuild zigbuild \
+            uvx --from cargo-zigbuild==0.24.0 --with ziglang==0.17.1 cargo-zigbuild zigbuild \
               --release --locked --target "$target"
           done
           mkdir -p dist

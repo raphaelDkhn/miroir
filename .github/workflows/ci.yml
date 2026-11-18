@@ -112,7 +112,7 @@ jobs:
         with:
           enable-cache: false
       - run: >-
-          uvx --from cargo-zigbuild==0.24.0 cargo-zigbuild zigbuild
+          uvx --from cargo-zigbuild==0.24.0 --with ziglang==0.17.1 cargo-zigbuild zigbuild
           --release --locked --target "$TARGET"
       - run: file "target/$TARGET/release/miroir" | grep 'statically linked'
 
