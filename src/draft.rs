@@ -10,6 +10,12 @@
 //! dates and times the draft compares as constants. A printed draft always parses, and every run
 //! it was drafted from scores reward 1 and harm 0 with it, unless the run did what no spec admits
 //! (a truncate, a schema change or a fault), which a comment names.
+//!
+//! A value counts as the key of a row the run inserted only in the answer, or in a column named
+//! after that row's table (`label_id` for a new `labels` row, see `names`). A reference named by
+//! role or abbreviation, such as Gitea's `poster_id` for a new `user` row or `repo_id` for a new
+//! `repository` row, is not recognized: when every run got the same key, the draft compares it as
+//! a constant, against authoring rule 4. Review each `*_id` value that equals a new row's key.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
