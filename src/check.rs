@@ -428,12 +428,14 @@ fn world(dir: &Path, root: &Table, problems: &mut Vec<String>) {
         let source = artifact.get("source").and_then(Toml::as_str);
         source.is_some_and(|source| Path::new(source) == evidence)
             && artifact.get("service").and_then(Toml::as_str) == Some(service)
+            && artifact.get("destination").is_none()
     });
     if !carried {
+        let evidence = evidence.display();
         problems.push(format!(
-            "artifacts: add {{ source = \"{}\", service = \"{service}\" }}, which carries the \
-             evidence to the grader",
-            evidence.display()
+            "artifacts: add {{ source = \"{evidence}\", service = \"{service}\" }} with no \
+             destination, which carries the evidence to the grader and to artifacts{evidence} \
+             in the trial, where miroir draft reads it"
         ));
     }
     compose(dir, service, problems);
@@ -1484,8 +1486,10 @@ networks:
     #[test]
     fn the_collect_hook_and_the_evidence_artifact_name_the_world_service() {
         let no_hook = "verifier.collect: no hook runs \"miroir collect\" in the world service";
-        let no_artifact =
-            "artifacts: add { source = \"/miroir/evidence\", service = \"acme-crm\" }";
+        let no_artifact = "artifacts: add { source = \"/miroir/evidence\", service = \
+                           \"acme-crm\" } with no destination, which carries the evidence to \
+                           the grader and to artifacts/miroir/evidence in the trial, where \
+                           miroir draft reads it";
         let hook = "[[verifier.collect]]\nservice = \"acme-crm\"\ncommand = \"miroir collect\"\n";
         assert_one_problem(&[
             (edited("service = \"acme-crm\"\ncommand", "service = \"main\"\ncommand"), no_hook),
@@ -1508,6 +1512,13 @@ networks:
             ),
             (edited("service = \"acme-crm\" }]", "service = \"main\" }]"), no_artifact),
             (edited("\"/miroir/evidence\"", "\"/miroir/run\""), no_artifact),
+            (
+                edited(
+                    "service = \"acme-crm\" }]",
+                    "service = \"acme-crm\", destination = \"evidence\" }]",
+                ),
+                no_artifact,
+            ),
         ]);
         let accepted = [
             edited("artifacts = [{", "artifacts = [\"/logs/x\", {"),
