@@ -181,9 +181,9 @@ A failure prints `bake step N, <what>: <why and the fix>` and exits 1, which fai
 ### Boot: `miroir run`, once per trial
 
 1. Read `/miroir/bake.json`.
-2. Make `/miroir/run/` empty, so no stale ready marker survives. If it was already there, the
-   container booted before: its dates may have moved already and its database holds that run's
-   changes, so the boot fails. A world boots once per container.
+2. Create `/miroir/run/`. If it is already there, the container booted before: its dates may
+   have moved already and its database holds that run's changes, so the boot fails and leaves
+   that run's files as they are. A world boots once per container.
 3. Start the sinks, recording to `/miroir/run/effects.jsonl` (and faults to `faults.jsonl`).
 4. Start the datastores until ready, then wait until the database answers.
 5. Shift dates from the bake to today ([Dates](#dates)).
