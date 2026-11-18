@@ -1,5 +1,5 @@
-//! Change capture on the fixture's real Postgres: what reaches `changes`, and what
-//! the grader makes of it.
+//! Change capture on the fixture's real Postgres: who may install it, what reaches `changes`,
+//! and what the grader makes of it.
 
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,36 @@ fn harm(evidence: &Evidence) -> serde_json::Value {
     let graded = grade(&spec("count-overdue-invoices"), Some(evidence), Some("3"));
     assert_eq!(graded.exit, 0, "scored, not void: {}", graded.stdout);
     graded.reward.unwrap()["harm"].clone()
+}
+
+/// A manifest whose `database.url` connects as the owner of the database and its tables, not as
+/// a superuser. Its datastore stands in for the world's Postgres, which already runs.
+const OWNER_MANIFEST: &str = "\
+expose: [3000]
+processes:
+  - {name: db, command: [sleep, '600'], datastore: true}
+database:
+  url: postgres://owner@127.0.0.1:5432/owned
+";
+
+#[test]
+#[ignore = "needs Docker and `docker buildx bake`"]
+fn a_bake_whose_database_url_is_not_a_superuser_fails_naming_the_fix() {
+    let world = World::boot();
+    world.psql("CREATE ROLE owner LOGIN");
+    world.psql("CREATE DATABASE owned OWNER owner");
+    let owner = ["psql", "-h", "127.0.0.1", "-U", "owner", "-d", "owned", "-v", "ON_ERROR_STOP=1"];
+    world.exec_ok(&[&owner[..], &["-c", "CREATE TABLE notes (id int PRIMARY KEY)"]].concat());
+    // The owner could install capture, but no later boot could shift its dates.
+    let bake = r#"rm /miroir/bake.json && printf '%s' "$1" > /miroir/miroir.yaml && miroir bake"#;
+    let out = world.exec(&["sh", "-c", bake, "sh", OWNER_MANIFEST]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    // sqlx may follow Postgres's message with the line of Postgres's own source it came from.
+    let refusal = "bake step 8, change capture: cannot install change capture: error returned from \
+                   database: role owner is not a superuser";
+    let fix = ": database.url must connect as a superuser";
+    assert!(stderr.contains(refusal) && stderr.contains(fix), "{stderr}");
 }
 
 #[test]
