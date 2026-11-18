@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, anyhow, bail};
-use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
 use sqlx::Connection;
 
@@ -282,23 +281,14 @@ fn change((tbl, op, pk, before, after, columns): ChangeRow) -> serde_json::Resul
     })
 }
 
-/// A JSON object of the evidence, with each value as a check must write it to equal what the
-/// grader's `json_extract` reads. The `serde_json` parser can land a bit off a float, which would
-/// then print as other text, so a float is parsed by the standard library and prints back as the
-/// text the evidence holds. A nested object or array keeps its text, which a check compares.
+/// A JSON object of the evidence, with each nested object or array as its text: the grader's
+/// `json_extract` reads it as text, so a check compares text, and runs differ where it does.
 fn exact(text: &str) -> serde_json::Result<Map<String, Value>> {
-    let raw: BTreeMap<String, Box<RawValue>> = serde_json::from_str(text)?;
-    let mut object = Map::new();
-    for (column, raw) in raw {
-        let text = raw.get();
-        let value = match serde_json::from_str(text)? {
-            Value::Number(number) if number.is_f64() => {
-                text.parse::<f64>().map_or(Value::Number(number), Value::from)
-            }
-            Value::Object(_) | Value::Array(_) => Value::String(text.to_owned()),
-            value @ (Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)) => value,
-        };
-        object.insert(column, value);
+    let mut object: Map<String, Value> = serde_json::from_str(text)?;
+    for value in object.values_mut() {
+        if value.is_array() || value.is_object() {
+            *value = Value::String(value.to_string());
+        }
     }
     Ok(object)
 }
@@ -1521,8 +1511,9 @@ mod tests {
         );
     }
 
-    /// The `serde_json` parser reads the evidence's `1.5220476764550182e-202` one bit off, as the
-    /// float written `1.522047676455018e-202`, which SQLite reads as another number.
+    /// Without its `float_roundtrip` feature, the `serde_json` parser reads the evidence's
+    /// `1.5220476764550182e-202` one bit off, as the float written `1.522047676455018e-202`, which
+    /// SQLite reads as another number.
     #[tokio::test]
     async fn floats_are_checked_with_the_text_the_evidence_holds() {
         let dir = new_dir();
@@ -1539,6 +1530,21 @@ mod tests {
         let values = "nested = '{\"x\":[1.5220476764550182e-202]}' \
                       AND x = 1.5220476764550182e-202 AND y = 0.1\n";
         assert!(text.contains(values), "{text}");
+    }
+
+    /// `[0.0]` and `[-0.0]` are equal JSON values but differ as the text a check compares, and a
+    /// nested value over 256 bytes is left out like long text.
+    #[tokio::test]
+    async fn nested_values_are_compared_and_measured_as_their_text() {
+        let dir = new_dir();
+        let meta = json!({"k": "x".repeat(CHECKED_BYTES)});
+        let row =
+            |v| evidence(vec![insert("rates", json!({"id": 1, "v": v, "meta": meta}))], vec![]);
+        let a = trial(&dir, PAY, &row(json!([0.0])), None).await;
+        let b = trial(&dir, PAY, &row(json!([-0.0])), None).await;
+        let text = contract(&[&a, &b]).await;
+        assert!(text.contains("# varies across runs: rates.v\n"), "{text}");
+        assert!(text.contains("# not checked, over 256 bytes: rates.meta\n"), "{text}");
     }
 
     #[tokio::test]
