@@ -458,9 +458,10 @@ fn change_item(change: &NetChange) -> Option<Item<'_>> {
 
 impl<'a> Item<'a> {
     /// Take out of `row` each value that is the key of a row the run inserted (`inserted`), into
-    /// `refers`: that of a column named as a reference is (`label_id`, `labelId`), unless it is
-    /// the inserted row's own key, and the answer when any of its ids is. Other integers, such as
-    /// flags and counts, stay, since a table that starts empty gives its first rows small keys.
+    /// `refers`: that of a column named as a reference to that row's table (`label_id` of a new
+    /// `labels` row, see `names`), unless it is the inserted row's own key, and the answer when
+    /// any of its ids is. Other integers, such as flags, counts and ids of other tables' rows,
+    /// stay, since a table that starts empty gives its first rows small keys that they equal.
     fn refer(&mut self, inserted: &BTreeMap<i64, BTreeSet<&'a str>>) {
         let refers = |column: &String| column.ends_with("_id") || column.ends_with("Id");
         let columns: Vec<String> = match self.kind {
@@ -473,23 +474,51 @@ impl<'a> Item<'a> {
             Kind::Request(..) | Kind::Email => return,
         };
         for column in columns {
-            let keys: Vec<i64> = match self.kind {
+            let (keys, by_name): (Vec<i64>, bool) = match self.kind {
                 Kind::Answer(answer) => {
                     let ids = answer.ids.iter().flat_map(|ids| ids.split(','));
-                    ids.filter_map(|id| id.parse().ok()).collect()
+                    (ids.filter_map(|id| id.parse().ok()).collect(), false)
                 }
                 Kind::Change(..) | Kind::Request(..) | Kind::Email => {
-                    self.row.get(&column).and_then(Value::as_i64).into_iter().collect()
+                    (self.row.get(&column).and_then(Value::as_i64).into_iter().collect(), true)
                 }
             };
-            let tables: BTreeSet<&'a str> =
-                keys.iter().filter_map(|key| inserted.get(key)).flatten().copied().collect();
+            let tables: BTreeSet<&'a str> = keys
+                .iter()
+                .filter_map(|key| inserted.get(key))
+                .flatten()
+                .copied()
+                .filter(|table| !by_name || names(&column, table))
+                .collect();
             if !tables.is_empty() {
                 self.row.remove(&column);
                 self.refers.push((column, tables));
             }
         }
     }
+}
+
+/// Whether a column named as a reference names `table`: the column's name without `_id` or `Id`,
+/// or its end after an underscore, is the table's name (after its schema) in the singular or the
+/// plural. `label_id` and `labelId` name `labels`, and `ref_issue_id` names `issue`; `repo_id`
+/// names no `collaboration` table, even when their ids are equal.
+fn names(column: &str, table: &str) -> bool {
+    let stem = column.strip_suffix("_id").or_else(|| column.strip_suffix("Id")).unwrap_or(column);
+    let mut words = String::new();
+    for c in stem.chars() {
+        if c.is_ascii_uppercase() && !words.is_empty() {
+            words.push('_');
+        }
+        words.push(c.to_ascii_lowercase());
+    }
+    let table = table.rsplit_once('.').map_or(table, |(_, name)| name).to_ascii_lowercase();
+    let mut ends = std::iter::once(words.as_str())
+        .chain(words.match_indices('_').map(|(at, _)| &words[at + 1..]));
+    ends.any(|end| {
+        let plural = end.strip_suffix('y').map(|base| format!("{base}ies"));
+        [end.to_owned(), format!("{end}s"), format!("{end}es")].contains(&table)
+            || plural.as_ref() == Some(&table)
+    })
 }
 
 /// The items of every run grouped by key, in the order keys first appear; a group holds the item
@@ -1894,6 +1923,75 @@ mod tests {
         changes[5] = granted(10, 6);
         let other = trial(&dir, PAY, &evidence(changes, Vec::new()), Some("58")).await;
         assert_eq!(graded(&text, &other).await, scored(0.0, 1), "a role granted to another user");
+    }
+
+    /// Repository `repo` given to user 16, as Gitea writes it: an access row, and the
+    /// collaboration row `key`. A table that starts empty gives its first row key 1, which
+    /// repository 1's id equals.
+    fn collaborator(key: i64, repo: i64) -> Evidence {
+        let changes = vec![
+            insert("access", json!({"id": 7, "mode": 1, "repo_id": repo, "user_id": 16})),
+            insert("collaboration", json!({"id": key, "mode": 1, "repo_id": repo, "user_id": 16})),
+        ];
+        evidence(changes, Vec::new())
+    }
+
+    #[tokio::test]
+    async fn an_id_is_a_new_rows_key_only_when_named_after_its_table() {
+        let dir = new_dir();
+        let a = trial(&dir, PAY, &collaborator(1, 1), None).await;
+        let b = trial(&dir, PAY, &collaborator(1, 1), None).await;
+        let text = contract(&[&a, &b]).await;
+        assert!(!text.contains("is the key of a new"), "{text}");
+        for table in ["access", "collaboration"] {
+            let allow = format!(
+                "  - {{table: {table}, op: insert, where: \"mode = 1 AND repo_id = 1 AND user_id = \
+                 16\"}}"
+            );
+            assert!(spec_lines(&text).contains(&allow.as_str()), "{allow}\n{text}");
+        }
+        let elsewhere = trial(&dir, PAY, &collaborator(1, 2), None).await;
+        assert_eq!(graded(&text, &elsewhere).await, scored(0.0, 1), "another repository");
+    }
+
+    #[tokio::test]
+    async fn a_column_not_named_as_a_reference_is_none_whatever_its_name() {
+        let dir = new_dir();
+        let changes = vec![
+            insert("versions", json!({"id": 2, "document_id": 4, "text": "Second draft"})),
+            update("documents", json!({"id": 4, "version": 1}), json!({"version": 2})),
+        ];
+        let run = evidence(changes, Vec::new());
+        let a = trial(&dir, PAY, &run, None).await;
+        let b = trial(&dir, PAY, &run, None).await;
+        let text = contract(&[&a, &b]).await;
+        let check = "      SELECT count(*) FROM after.\"documents\" WHERE id = 4 AND version = 2";
+        assert!(spec_lines(&text).contains(&check), "{text}");
+    }
+
+    #[test]
+    fn a_reference_names_its_table_in_the_singular_or_the_plural() {
+        for (column, table) in [
+            ("label_id", "labels"),
+            ("labelId", "labels"),
+            ("issue_id", "issue"),
+            ("ref_issue_id", "issue"),
+            ("refIssueId", "issues"),
+            ("box_id", "boxes"),
+            ("category_id", "categories"),
+            ("invoice_id", "billing.invoices"),
+        ] {
+            assert!(names(column, table), "{column} names {table}");
+        }
+        for (column, table) in [
+            ("repo_id", "collaboration"),
+            ("poster_id", "issue_content_history"),
+            ("repo_id", "repository"),
+            ("label_id", "labelss"),
+            ("Id", "labels"),
+        ] {
+            assert!(!names(column, table), "{column} does not name {table}");
+        }
     }
 
     #[tokio::test]
