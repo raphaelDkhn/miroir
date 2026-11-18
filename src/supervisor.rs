@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
-use std::process::{ExitStatus, Stdio};
+use std::process::{ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -203,10 +203,10 @@ impl Supervisor {
                 "`{shown}` did not finish within {} s, so it was killed",
                 limit.as_secs()
             ))),
-            Ok(Some(status)) if status.success() => Ok(()),
-            Ok(Some(status)) => Err(SupervisorError::Command(format!(
+            Ok(Some(output)) if output.status.success() => Ok(()),
+            Ok(Some(output)) => Err(SupervisorError::Command(format!(
                 "`{shown}` exited with {}; its output is above",
-                described(status)
+                described(output.status)
             ))),
         }
     }
@@ -250,15 +250,20 @@ impl Supervisor {
         limit: Duration,
     ) -> Result<Option<String>, SupervisorError> {
         let mut command = self.command(argv);
-        command.stdout(Stdio::null()).stderr(Stdio::null());
+        // Its stderr says why it failed; a child left holding it open makes the run time out.
+        command.stdout(Stdio::null()).stderr(Stdio::piped());
         match bounded(command, limit).await {
             Err(e) => Err(SupervisorError::Spawn(format!(
                 "cannot run the quiet command `{}`: {e}; check that its program is installed \
                  and on PATH",
                 argv.join(" ")
             ))),
-            Ok(Some(status)) if status.success() => Ok(None),
-            Ok(Some(status)) => Ok(Some(format!("its last run exited with {}", described(status)))),
+            Ok(Some(output)) if output.status.success() => Ok(None),
+            Ok(Some(output)) => Ok(Some(format!(
+                "its last run exited with {}{}",
+                described(output.status),
+                last_line(&output.stderr)
+            ))),
             Ok(None) => Ok(Some("its last run was killed at the limit".into())),
         }
     }
@@ -358,15 +363,15 @@ async fn record_crash(faults: PathBuf, name: &str, status: &str) {
 }
 
 /// Run `command` until it exits or `limit` passes; then its process group is killed and the
-/// result is `None`.
-async fn bounded(mut command: Command, limit: Duration) -> std::io::Result<Option<ExitStatus>> {
-    let mut child = command.kill_on_drop(true).spawn()?;
+/// result is `None`. Only the streams given `Stdio::piped()` are read into the output.
+async fn bounded(mut command: Command, limit: Duration) -> std::io::Result<Option<Output>> {
+    let child = command.kill_on_drop(true).spawn()?;
     let pid = pid(&child);
     if let Some(pid) = pid {
         deprioritize(pid)?;
     }
-    if let Ok(status) = timeout(limit, child.wait()).await {
-        return status.map(Some);
+    if let Ok(output) = timeout(limit, child.wait_with_output()).await {
+        return output.map(Some);
     }
     if let Some(pid) = pid {
         signal(pid, Signal::KILL);
@@ -394,6 +399,13 @@ fn deprioritize(pid: Pid) -> std::io::Result<()> {
         std::fs::write(format!("/proc/{}/oom_score_adj", pid.as_raw_pid()), "1000")?;
     }
     Ok(())
+}
+
+/// `: <the last line>` of what a command printed, or nothing when it printed none.
+fn last_line(printed: &[u8]) -> String {
+    let text = String::from_utf8_lossy(printed);
+    let last = text.lines().map(str::trim).rfind(|line| !line.is_empty());
+    last.map(|line| format!(": {line}")).unwrap_or_default()
 }
 
 /// `status N`, or `signal N` when a signal ended the process.
@@ -805,6 +817,10 @@ mod tests {
         let error =
             supervisor().wait_quiet(Some(&sh("exit 3")), Duration::from_secs(1)).await.unwrap_err();
         assert!(error.to_string().contains("(its last run exited with status 3)"), "{error}");
+        let said = sh("echo starting >&2; echo 'queue unreachable ' >&2; echo >&2; exit 3");
+        let error = supervisor().wait_quiet(Some(&said), Duration::from_secs(1)).await.unwrap_err();
+        let reason = "(its last run exited with status 3: queue unreachable)";
+        assert!(error.to_string().contains(reason), "{error}");
         let missing = vec!["/nonexistent/miroir-quiet".to_string()];
         let started = Instant::now();
         let error = supervisor().wait_quiet(Some(&missing), LONG).await.unwrap_err();
