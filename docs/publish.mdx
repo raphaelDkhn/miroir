@@ -1,0 +1,84 @@
+---
+title: "Publish"
+description: "Pin the images, pass the release gate, and publish the dataset with Harbor."
+---
+
+Publishing is Harbor's job ([Publish](https://docs.harborframework.com/harbor-hub/publish)). What
+Miroir adds is pinning every task's three images by digest, and passing the check job before you
+publish.
+
+<Note>The image push, `harbor auth login` and `harbor publish` were not run for these docs.</Note>
+
+<Steps>
+  <Step title="Push the world image">
+    ```bash
+    docker buildx build --push -t ghcr.io/me/my-env:1.0.0 -f Dockerfile.miroir .
+    digest=$(docker buildx imagetools inspect ghcr.io/me/my-env:1.0.0 --format '{{json .Manifest}}' | jq -r .digest)
+    ```
+  </Step>
+  <Step title="Pin all three images in every task">
+    Pin each image by digest (`repo:tag@sha256:…`), for example with `sed`:
+
+    - the world, in the compose file's `image:`;
+    - `miroir-main`, in `[environment].docker_image`;
+    - `miroir`, in `[verifier.environment].docker_image`.
+
+    The release images of the grader and the agent's container are `ghcr.io/raphaeldkhn/miroir`
+    and `ghcr.io/raphaeldkhn/miroir-main`, tagged `<major>.<minor>` and
+    `<major>.<minor>.<patch>`.
+  </Step>
+  <Step title="Lint the tasks">
+    ```bash
+    docker compose config --help | grep -q -- --no-env-resolution   # else lint skips the compose image
+    harbor lint --extend-select unpinned-image tasks/*/
+    ```
+
+    `--extend-select unpinned-image` checks that all three images are pinned. `harbor lint` checks
+    the compose file only with Docker Compose 2.35.0 or later, which has
+    `config --no-env-resolution`. An older Compose makes it report `invalid-task-config` for every
+    task, so check for the flag first, as above. Pass the task directories (`tasks/*/`), never
+    their parent: lint reads each argument as one task.
+  </Step>
+  <Step title="Pass the release gate">
+    Run the [check job](/validate#run-the-check-job) with two attempts:
+
+    ```bash
+    harbor run -c check.yaml -k 2 --job-name release && miroir check --tasks tasks jobs/release
+    ```
+  </Step>
+  <Step title="Publish the dataset">
+    ```bash
+    harbor dataset init me/my-env --description "My product's tasks" -o tasks   # once; adds the tasks
+    harbor dataset add --scan tasks --to tasks   # after adding tasks
+    harbor auth login                            # or HARBOR_API_KEY in CI
+    harbor publish tasks -t 1.0.0 --public       # private without --public; --public asks to confirm
+    ```
+
+    Runs then use the published name: `harbor run -d me/my-env@1.0.0`.
+  </Step>
+</Steps>
+
+## Where images must be public
+
+Harbor Hub packages hold the task directories, not the images. Harbor never logs a cloud
+sandbox's inner Docker in to a registry, so a world run on Daytona, GKE or Modal must be a public
+image.
+
+A private world runs wherever its image can be pulled: on local Docker after `docker login`, or on
+a self-hosted runner with registry access. Hosted Harbor stores
+[registry credentials](https://docs.harborframework.com/hosted-harbor/registry-credentials) for
+private task images; whether they reach compose sidecars is not verified.
+
+## A publisher's CI gate
+
+Run this on every change to the world or the tasks, and with `-k 2` before a release:
+
+1. Build the images.
+2. `miroir check --tasks <dir>`, for the static checks.
+3. The Compose flag check, then `harbor lint <dir>/*/`.
+4. `harbor run -c check.yaml`, then `miroir check --tasks <dir> jobs/<job>`, which must exit 0.
+
+Miroir's own gate,
+[`tests/e2e.sh`](https://github.com/raphaelDkhn/miroir/blob/master/tests/e2e.sh), does this for
+the fixture. It then also regrades the job with a changed spec, and checks that a trial without
+evidence voids.

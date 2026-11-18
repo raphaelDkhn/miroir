@@ -26,7 +26,7 @@ Contributions are licensed under [Apache-2.0](LICENSE), like the rest of Miroir.
 | `examples/gitea/` | Stock Gitea as three worlds, and the generator of their tasks |
 | `tests/integration/` | Docker integration tests: boot, the collect and grade pipeline, change capture |
 | `tests/e2e.sh` | The Harbor end-to-end gate on the fixture |
-| `docs/` | The mdBook site |
+| `docs/` | The Mintlify site; its `.md` pages are also the skill's references |
 | `skills/miroir/`, `.claude-plugin/marketplace.json` | The skill for coding agents, and its Claude Code plugin |
 
 ## Build
@@ -89,21 +89,26 @@ no mutant alive.
 
 ## Docs and the skill
 
-The site has six pages in `docs/src/`. Two of them, `environment.md` and `tasks.md`, include the
-skill's references, `skills/miroir/references/environment.md` and `tasks.md`, from their third
-line, so a fact has one source: edit the reference, not the page. The references use absolute
-links, which work from both places.
+The site is a [Mintlify](https://mintlify.com) project in `docs/`, published at
+https://miroir.mintlify.site; `docs/docs.json` holds its navigation. Its `.md` pages (environment,
+manifest, lifecycle, tasks, spec, evidence) are also the skill's references:
+`skills/miroir/references/` holds symlinks to them, so a fact has one source. Keep them plain
+Markdown, without Mintlify components, so agents read them as they are; the `.mdx` pages are for
+the site only.
 
 ```bash
-mdbook build docs
+cd docs
+npx mint@4.3.49 dev                                              # preview on localhost:3000
+npx mint@4.3.49 validate
+npx mint@4.3.49 broken-links --check-anchors --check-snippets
+cd ..
 uvx --from skills-ref==0.1.1 agentskills validate skills/miroir
 claude plugin validate --strict .
 ```
 
-`mdbook serve docs` serves the site locally. A change to the manifest, the task format, the spec,
-the evidence or a command's output updates the references in the same pull request. The docs
-show only commands that were run, with their real output; a command that pushes, publishes or
-spends money is marked as not run.
+A change to the manifest, the task format, the spec, the evidence or a command's output updates
+the docs in the same pull request. The docs show only commands that were run, with their real
+output; a command that pushes, publishes or spends money is marked as not run.
 
 ## Release
 

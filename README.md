@@ -49,7 +49,7 @@ runs.
 
 ## More
 
-- [Docs](https://raphaeldkhn.github.io/miroir/): wrap a product, write tasks, validate, train
+- [Docs](https://miroir.mintlify.site): wrap a product, write tasks, validate, train
 - [Gitea example](examples/gitea): stock Gitea, three seeded companies, 120 tasks
 - [Skill](skills/miroir/SKILL.md) for coding agents. In Claude Code:
   `claude plugin marketplace add raphaelDkhn/miroir`, then `claude plugin install miroir@miroir`

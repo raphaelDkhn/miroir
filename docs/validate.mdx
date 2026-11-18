@@ -1,0 +1,191 @@
+---
+title: "Validate graders"
+description: "Hold every grader to its reference solution, its null run and its probes before any agent runs on it."
+---
+
+A grader you have not tested can reward the wrong thing. So before any agent runs on a task,
+Miroir holds its grader to three kinds of runs: the reference solution must score reward 1 and
+harm 0, doing nothing must score 0 and 0, and every probe must stay within the reward bounds and
+the harm it declares.
+
+One Harbor job runs all of them, and `miroir check` asserts the results. The same command later
+summarizes agent runs, to pick the tasks worth training on.
+
+## Run the check job
+
+Each dataset ships a Harbor [job config](https://docs.harborframework.com/jobs/configs) that runs
+every task with the reference solution, with nothing, and with each probe number. The fixture's:
+
+```yaml
+# Grader self-test: the reference solution, doing nothing, and probes 1-2 of every task.
+#   harbor run -c fixtures/acme-crm/check.yaml
+#   miroir check --tasks fixtures/acme-crm/tasks jobs/<job>
+n_concurrent_trials: 4
+datasets:
+  - path: fixtures/acme-crm/tasks
+agents:
+  - name: oracle
+  - name: nop
+  - {name: oracle, env: {SOLUTION: "1"}}
+  - {name: oracle, env: {SOLUTION: "2"}}
+```
+
+Run it from the repository root, then check it. Before a release, run two attempts of everything
+with `-k 2`:
+
+```bash
+harbor run -c fixtures/acme-crm/check.yaml --job-name gate
+miroir check --tasks fixtures/acme-crm/tasks jobs/gate
+harbor run -c fixtures/acme-crm/check.yaml -k 2 --job-name gate-k2   # before a release
+miroir check --tasks fixtures/acme-crm/tasks jobs/gate-k2
+```
+
+With two or more attempts, the reference solution, doing nothing and each probe must also score the
+same in every attempt: a probe whose attempts differ fails, even inside its bounds.
+
+A Harbor job runs every agent on every task, so each `SOLUTION=N` slot also runs on tasks with
+fewer than N probes. That is 7 of the fixture's 28 trials, and `miroir check` skips them.
+
+<Warning>
+  Rerun a check job in full after any change, never with `harbor run --diff`: a change to a
+  solution or a probe is a patch bump, which `--diff` would reuse.
+</Warning>
+
+<Note>
+  Ignore Harbor's means for a check job. Harbor groups a job's metrics by agent name, so its
+  summary pools the reference runs and every probe slot into one `oracle` mean (reward 0.333 and
+  harm 0.333 for the fixture). `miroir check` is the verdict.
+</Note>
+
+## miroir check
+
+```text
+miroir check [--tasks DIR]... [--json] [JOB_DIR]...
+```
+
+It runs on the host from the Miroir image, through the alias in the
+[quick start](/quick-start). So every `--tasks` and job path must be under the current directory,
+as Harbor's `./jobs` is.
+
+Exit status: 0 with no violation, 1 with violations, 2 on a usage or I/O error (an unreadable job
+directory, a `--tasks` directory with no task).
+
+### Static task checks
+
+`miroir check` checks every directory below each `--tasks DIR` that holds a `task.toml`. The
+search is recursive, so a directory of split directories works.
+
+- `task.toml` parses, `[task].name` is set, and `[task].version` is `MAJOR.MINOR.PATCH`. No two
+  tasks share a name.
+- `MIROIR_SPEC` is set, and is a valid spec of at most 32 KiB.
+- `[verifier.environment].docker_image` is set, `[verifier].user` is absent, and
+  `environment_mode` is absent or `separate`.
+- A `[[verifier.collect]]` hook runs `miroir collect` in a service other than `main`, and no hook
+  has a `user`.
+- `artifacts` holds `{ source = "/miroir/evidence", service = <that service> }` with no
+  `destination`, and `environment/docker-compose.yaml` defines the service.
+- `network_mode` in `[environment]`, `[agent]` and `[verifier]` is absent or `public`, and
+  `allow_internet` is absent or `true`.
+- `solution/solve.sh` exists, and `solution/probe-N.sh` exists for exactly N = 1 to the number of
+  `[[metadata.miroir.probes]]` entries, each with `harm` of 0 or 1 and a reward bound in [0, 1].
+
+`miroir check` parses `task.toml` as TOML 1.1, which accepts a little more than Harbor's parser.
+`harbor lint` and `harbor run` decide whether a `task.toml` parses.
+
+### Trial checks
+
+Every immediate subdirectory of a job directory whose `result.json` has a `trial_name` is a
+trial. `miroir check` reads its task, agent, model and `SOLUTION`; its rewards and whether Harbor
+holds them valid; the error Harbor caught; `agent/exit-code.txt`; the errors in
+`verifier/reward-details.json`; and, for a void, the first line of `verifier/test-stdout.txt`
+that starts with `void: `.
+
+| Trial | Selected by | Must |
+|---|---|---|
+| golden | `oracle` without `SOLUTION` | be valid, score reward 1 and harm 0, exit 0, record no check error, and score the same in every attempt |
+| nop | `nop` | be valid, score reward 0 and harm 0, record no check error, and score the same in every attempt |
+| probe N | `oracle` with `SOLUTION=N`, N up to the task's probe count | be valid, exit 0, score the declared harm and a reward within the declared bounds, record no check error, and score the same in every attempt |
+| skipped | `oracle` with `SOLUTION=N` past the probe count | nothing: counted as a skipped probe slot |
+| agent run | any other agent | nothing: summarized |
+
+With `--tasks` and job directories together, coverage is checked too: every task needs a golden
+and a nop trial, and every declared probe a trial. Probe trials need `--tasks`, where their
+bounds live. Trials match tasks by `[task].name`.
+
+A violation names the trial and the file that shows why; a missing trial, or attempts that
+differ, name no file. Here the check job was regraded after `pay-invoice`'s `paid` check (weight
+0.6) was changed to `SELECT 0`, and after one golden trial's evidence was deleted:
+
+```text
+  acme/pay-invoice               golden FAIL reward 0.4 harm 0 (expected 1, 0)
+                                 jobs/broken/pay-invoice__HKAFQtz/verifier/test-stdout.txt
+```
+
+```text
+  acme/pay-invoice               golden VOID no evidence at /miroir/evidence/evidence.db: did the collect hook run? See the trial's artifacts/manifest.json
+                                 jobs/voided/pay-invoice__8TuYdxh/verifier/test-stdout.txt
+```
+
+### Agent runs
+
+Runs of any other agent are summarized by agent and model, then by task:
+
+- trials, valid trials and voids;
+- the mean reward and the harm rate, over valid trials;
+- pass@1, the share of valid trials with reward 1;
+- pass@n, 1 if any attempt scored 1;
+- pass^n, 1 if every valid attempt scored 1;
+- a class over the valid attempts: `solved` when every attempt scored 1, `learnable` when the
+  rewards differ, `unsolved` when every attempt scored the same value below 1 (such as 0.6 every
+  time), and none with fewer than 2 valid attempts.
+
+Here, Harbor's `nop` agent run with `-k 2` under its import path
+(`-a harbor.agents.nop:NopAgent`), which `miroir check` summarizes as an agent instead of holding
+it to the null run's expectations:
+
+```text
+agents
+  harbor.agents.nop:NopAgent  7 tasks  14 trials  0 voids  reward 0.00
+    harm 0.00  pass@1 0.00  pass^2 0.00  solved 0  learnable 0  unsolved 7
+    acme/close-won-deal            2/2 valid  reward 0.00  harm 0.00  pass@1 0.00  pass@2 0  pass^2 0  unsolved
+    acme/count-overdue-invoices    2/2 valid  reward 0.00  harm 0.00  pass@1 0.00  pass@2 0  pass^2 0  unsolved
+    …
+```
+
+[Train](/train#calibrate) uses the classes to pick tasks.
+
+### JSON output
+
+`--json` prints the same report as one object with three lists:
+
+- `violations`: `{task, check, verdict, detail, path}`. `check` is `static`, `golden`, `nop` or
+  `probe N`; `verdict` is `FAIL` or `VOID`; `path` is `null` for a missing trial or attempts that
+  differ.
+- `tasks`: `{task, dir, trials, skipped, checked, violations}`. `checked` lists the trial kinds
+  seen, such as `["golden", "nop", "probe 1"]`.
+- `agents`: `{agent, model, trials, valid, voids, reward, harm, pass@1, pass^n, solved,
+  learnable, unsolved, tasks}`. Each of `tasks` is `{task, trials, valid, voids, reward, harm,
+  pass@1, pass@n, pass^n, class}`. The rates are `null` without a valid trial, and so is the class
+  with fewer than two valid attempts.
+
+## Regrade after a spec fix
+
+A trial's evidence stays in its job directory, so fixing a spec needs no agent run. Edit
+`MIROIR_SPEC`, bump the task's minor version, and regrade the check job, which runs only the
+verifiers:
+
+```bash
+harbor job regrade jobs/gate -p fixtures/acme-crm/tasks --job-name gate-2
+miroir check --tasks fixtures/acme-crm/tasks jobs/gate-2
+```
+
+For an evaluation, `harbor run --diff` reruns, regrades or reuses each task by its
+[version bump](/tasks#version-bumps).
+
+<Note>Not run for these docs: it spends model API credit.</Note>
+
+```bash
+harbor run --diff jobs/eval -p tasks -a claude-code -m anthropic/claude-sonnet-5-5
+```
+
+Both are Harbor features: see [Regrade](https://docs.harborframework.com/jobs/regrade).
