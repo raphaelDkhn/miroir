@@ -570,6 +570,12 @@ fn split(group: &[&Item]) -> (Map<String, Value>, Vec<String>) {
 struct Draft {
     /// The name and SQL of each check.
     checks: Vec<(String, String)>,
+    /// The names in `checks`.
+    names: BTreeSet<String>,
+    /// The SQL in `checks`.
+    drafted: BTreeSet<String>,
+    /// The last suffix each base name was tried with, so that naming resumes after it.
+    suffixes: BTreeMap<String, usize>,
     /// The paste-ready `allow` lines, in evidence order.
     allow: Vec<String>,
     /// What only some runs did, and what is checked or allowed whatever its values.
@@ -735,19 +741,18 @@ impl Draft {
 
     /// Add a check named after `words`, unless a check with the same SQL is drafted.
     fn check(&mut self, words: &str, sql: String) {
-        if self.checks.iter().any(|(_, drafted)| *drafted == sql) {
+        if !self.drafted.insert(sql.clone()) {
             return;
         }
         let base = name(words);
         let mut name = base.clone();
-        let mut n = 1;
+        let n = self.suffixes.entry(base.clone()).or_insert(1);
         // `null`, `true` and `false` would read back from the YAML as no name at all.
-        while ["null", "true", "false"].contains(&name.as_str())
-            || self.checks.iter().any(|(other, _)| *other == name)
-        {
-            n += 1;
+        while ["null", "true", "false"].contains(&name.as_str()) || self.names.contains(&name) {
+            *n += 1;
             name = format!("{base}_{n}");
         }
+        self.names.insert(name.clone());
         self.checks.push((name, sql));
     }
 
@@ -2287,8 +2292,12 @@ mod tests {
         for (words, sql) in [("null", "SELECT 4"), ("true", "SELECT 5"), ("False", "SELECT 6")] {
             draft.check(words, sql.into());
         }
+        for (words, sql) in [("a b 4", "SELECT 7"), ("a b", "SELECT 8")] {
+            draft.check(words, sql.into());
+        }
         let names: Vec<&str> = draft.checks.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, ["a_b", "a_b_2", "a_b_3", "null_2", "true_2", "false_2"]);
+        let expected = ["a_b", "a_b_2", "a_b_3", "null_2", "true_2", "false_2", "a_b_4", "a_b_5"];
+        assert_eq!(names, expected);
     }
 
     #[test]
