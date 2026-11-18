@@ -76,7 +76,7 @@ async fn main() -> ExitCode {
         }
         Command::Draft { inputs } => {
             logs();
-            verdict(draft::run(&draft::DraftArgs { inputs }, &mut std::io::stdout()))
+            verdict(draft::run(&draft::DraftArgs { inputs }, &mut std::io::stdout()).await)
         }
     }
 }
