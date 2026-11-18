@@ -222,17 +222,16 @@ pub async fn open(path: &Path) -> anyhow::Result<SqliteConnection> {
     let meta: BTreeMap<String, String> = sqlx::query_as("SELECT key, value FROM meta")
         .fetch_all(&mut conn)
         .await
-        .with_context(|| format!("{} is not Miroir evidence", path.display()))?
+        .context("it is not Miroir evidence")?
         .into_iter()
         .collect();
     let format = meta.get("format").map_or("none", String::as_str);
     if format != FORMAT {
         let writer = meta.get("miroir").map_or("unknown", String::as_str);
         anyhow::bail!(
-            "{} is evidence format {format}, written by miroir {writer}, but this miroir ({}) \
+            "it is evidence format {format}, written by miroir {writer}, but this miroir ({}) \
              reads format {FORMAT}: grade it with the miroir image of the release that \
              collected it",
-            path.display(),
             env!("CARGO_PKG_VERSION"),
         );
     }

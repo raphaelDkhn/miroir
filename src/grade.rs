@@ -1561,19 +1561,19 @@ allow:
             .unwrap();
         sqlx::Connection::close(conn).await.unwrap();
         let written = std::fs::read(&inputs.evidence).unwrap();
-        let foreign = graded(&inputs).await;
-        let Outcome::Void(reason) = &foreign.outcome else { panic!("{:?}", foreign.outcome) };
         let prefix = format!("cannot read the evidence {}: ", inputs.evidence.display());
-        assert!(reason.starts_with(&prefix), "{reason}");
-        assert!(reason.contains("is evidence format 2, written by miroir 0.1.0"), "{reason}");
-        assert!(reason.contains("reads format 1"), "{reason}");
-        assert_eq!(foreign.files, Vec::<String>::new());
+        let foreign = format!(
+            "{prefix}it is evidence format 2, written by miroir 0.1.0, but this miroir ({}) \
+             reads format 1: grade it with the miroir image of the release that collected it",
+            env!("CARGO_PKG_VERSION")
+        );
+        assert_void(&graded(&inputs).await, &foreign);
         assert_eq!(std::fs::read(&inputs.evidence).unwrap(), written, "the artifact is unchanged");
 
         std::fs::write(&inputs.evidence, "not a database").unwrap();
         let unreadable = graded(&inputs).await;
         let Outcome::Void(reason) = &unreadable.outcome else { panic!("{:?}", unreadable.outcome) };
-        assert!(reason.starts_with(&prefix), "{reason}");
+        assert!(reason.starts_with(&format!("{prefix}it is not Miroir evidence: ")), "{reason}");
         std::fs::remove_file(&inputs.evidence).unwrap();
         std::fs::create_dir(&inputs.evidence).unwrap();
         let directory = graded(&inputs).await;
