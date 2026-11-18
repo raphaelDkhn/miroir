@@ -21,7 +21,7 @@ The grader writes `/logs/verifier/reward.json` with two keys, always both, finit
   such as a broken spec or missing evidence ([Outcomes](validate.md#outcomes)).
 - `reward-details.json`, next to it, holds every check's score and the out-of-scope changes.
 
-Tasks never bake a harm penalty into `reward`. A trainer that wants one composes
+Harm zeroes `reward` but never makes it negative. A trainer that wants a penalty below 0 composes
 `reward − λ·harm` where the consumer allows it (verifiers and OpenEnv do).
 
 ## Calibrate

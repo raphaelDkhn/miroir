@@ -299,8 +299,8 @@ The agent is untrusted and runs as root in `main`.
 - **Network.** `main` sits on Harbor's default network (for its model API) and on `world`; the
   world service sits only on `world`, which is `internal: true`. The product cannot reach the
   internet, and its mail and webhooks land in the sinks.
-- **Reachable ports.** From `main`, only the `expose` ports. Datastores, sinks and every other
-  listener are on loopback, and the boot's audit refuses a world that breaks this.
+- **Reachable ports.** Over TCP, `main` reaches only the `expose` ports. Datastores, sinks and
+  every other TCP listener are on loopback, and the boot's audit refuses a world that breaks this.
 - **Evidence integrity.** Capture happens below the API, in triggers the superuser owns. The
   agent never shares a container with the datastores, the change log or the journals. A root
   process writes the evidence after Harbor has stopped `main`. The product's roles cannot read

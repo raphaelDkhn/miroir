@@ -34,7 +34,8 @@ miroir check --tasks fixtures/acme-crm/tasks jobs/gate-k2
 
 A Harbor job is every agent on every task, so each `SOLUTION=N` slot runs on every task, also on
 those with fewer than N probes: 7 of the fixture's 28 trials, which `miroir check` skips. With
-two or more attempts (`-k 2`), the reference solution must also score the same in every attempt.
+two or more attempts (`-k 2`), the reference solution, doing nothing and each probe must also
+score the same in every attempt; a probe whose attempts differ fails even inside its bounds.
 
 Rerun a check job in full after any change, never with `harbor run --diff`: a change to a
 solution or a probe is a patch bump, which `--diff` would reuse.
@@ -86,8 +87,8 @@ that starts with `void: `.
 | Trial | Selected by | Must |
 |---|---|---|
 | golden | `oracle` without `SOLUTION` | be valid, score reward 1 and harm 0, exit 0, record no check error, and score the same in every attempt |
-| nop | `nop` | be valid, score reward 0 and harm 0, record no check error |
-| probe N | `oracle` with `SOLUTION=N`, N up to the task's probe count | be valid, exit 0, score the declared harm and a reward within the declared bounds, record no check error |
+| nop | `nop` | be valid, score reward 0 and harm 0, record no check error, and score the same in every attempt |
+| probe N | `oracle` with `SOLUTION=N`, N up to the task's probe count | be valid, exit 0, score the declared harm and a reward within the declared bounds, record no check error, and score the same in every attempt |
 | skipped | `oracle` with `SOLUTION=N` past the probe count | nothing: counted as a skipped probe slot |
 | agent run | any other agent | nothing: summarized |
 
@@ -95,9 +96,9 @@ With `--tasks` and job directories together, coverage is checked too: every task
 and a nop trial, and every declared probe a trial. Probe trials need `--tasks`, where their
 bounds live; trials match tasks by `[task].name`.
 
-A violation names the trial and the file that shows why. Here the check job was regraded after
-`pay-invoice`'s `paid` check (weight 0.6) was changed to `SELECT 0`, and after one golden
-trial's evidence was deleted:
+A violation names the trial and the file that shows why; a missing trial or attempts that differ
+name no file. Here the check job was regraded after `pay-invoice`'s `paid` check (weight 0.6) was
+changed to `SELECT 0`, and after one golden trial's evidence was deleted:
 
 ```text
   acme/pay-invoice               golden FAIL reward 0.4 harm 0 (expected 1, 0)
@@ -144,7 +145,8 @@ agents
 `--json` prints the same report as one object with three lists:
 
 - `violations`: `{task, check, verdict, detail, path}`, where `check` is `static`, `golden`, `nop`
-  or `probe N` and `verdict` is `FAIL` or `VOID`;
+  or `probe N`, `verdict` is `FAIL` or `VOID`, and `path` is `null` for a missing trial or
+  attempts that differ;
 - `tasks`: `{task, dir, trials, skipped, checked, violations}`, where `checked` lists the trial
   kinds seen, such as `["golden", "nop", "probe 1"]`;
 - `agents`: `{agent, model, trials, valid, voids, reward, harm, pass@1, pass^n, solved,

@@ -101,8 +101,8 @@ validation
 ```
 
 The reference solution scored reward 1 and harm 0 on every task, doing nothing scored 0 and 0,
-and every probe stayed within the bounds and harm its task declares. Tasks with fewer than two
-probes still ran the `SOLUTION=2` slot; `miroir check` skips those 7 trials. Harbor's own summary
+and every probe stayed within the bounds and harm its task declares. Tasks with fewer than N
+probes still ran the `SOLUTION=N` slot; `miroir check` skips those 7 trials. Harbor's own summary
 of this job pools the reference runs and the probes into one `oracle` mean, which means nothing
 here: `miroir check` is the verdict.
 
