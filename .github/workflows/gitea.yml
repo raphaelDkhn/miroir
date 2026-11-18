@@ -79,6 +79,16 @@ jobs:
       contents: read
       packages: write  # the world images on GHCR
     steps:
+      # GitHub creates a missing environment unprotected; without its secret, nothing is pushed.
+      - name: The harbor-hub environment holds HARBOR_API_KEY
+        env:
+          HARBOR_API_KEY: ${{ secrets.HARBOR_API_KEY }}
+        run: |
+          if [ -z "$HARBOR_API_KEY" ]; then
+            echo "::error::create the harbor-hub environment, with required reviewers and the" \
+              "HARBOR_API_KEY secret, before publishing"
+            exit 1
+          fi
       - name: Docker Compose lets harbor lint below check the compose images' pins
         run: |
           if ! grep -q -- --no-env-resolution <<<"$(docker compose config --help)"; then
@@ -103,6 +113,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # The release's images are looked up first, so a missing release pushes nothing.
       - name: Push the worlds, then generate the tasks with every image pinned by digest
         run: |
           digest() { # REF: the digest the registry holds for REF
@@ -111,6 +122,10 @@ jobs:
             jq -er .digest <<<"$manifest"
           }
           release=${GITHUB_REF_NAME#v}
+          main="ghcr.io/raphaeldkhn/miroir-main:$release"
+          main="$main@$(digest "$main")"
+          grader="ghcr.io/raphaeldkhn/miroir:$release"
+          grader="$grader@$(digest "$grader")"
           worlds=()
           for world in orbit ferry kestrel; do
             ref="ghcr.io/raphaeldkhn/miroir-gitea:$release-$world"
@@ -119,10 +134,6 @@ jobs:
             pinned="$ref@$(digest "$ref")"
             worlds+=(--world "$world=$pinned")
           done
-          main="ghcr.io/raphaeldkhn/miroir-main:$release"
-          main="$main@$(digest "$main")"
-          grader="ghcr.io/raphaeldkhn/miroir:$release"
-          grader="$grader@$(digest "$grader")"
           uv run --python 3.12 examples/gitea/tasks.py --out "$DATASETS" "${worlds[@]}" \
             --main "$main" --grader "$grader"
       - run: harbor lint --extend-select unpinned-image "$DATASETS"/*/*/
