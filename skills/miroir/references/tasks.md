@@ -87,7 +87,7 @@ timeout_sec = 120.0
 
 | Field | Value | Why |
 |---|---|---|
-| `artifacts` | `[{ source = "/miroir/evidence", service = "<world service>" }]` | Carries the evidence to the grader. Declare nothing else: Harbor collects `/logs/artifacts` from `main` by itself. |
+| `artifacts` | `[{ source = "/miroir/evidence", service = "<world service>" }]`, with no `destination` | Carries the evidence to the grader, and to `artifacts/miroir/evidence` in the trial, where `miroir draft` reads it. Declare nothing else: Harbor collects `/logs/artifacts` from `main` by itself. |
 | `[task] name` | `"<org>/<name>"` | Regrade and `miroir check` match trials to tasks by it. |
 | `[task] version` | `MAJOR.MINOR.PATCH` | [Version bumps](#version-bumps) |
 | `[metadata.miroir] note` | text | Optional, for reviewers: what the instance plants. |

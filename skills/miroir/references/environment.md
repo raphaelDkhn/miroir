@@ -81,7 +81,7 @@ lists, `[program, arg, ...]`, run without a shell unless you write `[sh, -c, "..
 | `processes` | yes | At least one with `datastore: true`; every datastore comes before the other processes. |
 | `processes[].name` | yes | Lower-case letters, digits and `-`; unique. |
 | `processes[].command` | yes | An argv. |
-| `processes[].user` | no | A user in `/etc/passwd`. Without it the process runs as root. |
+| `processes[].user` | no | A user in `/etc/passwd`. The process runs as it, with `HOME` set to its home directory unless `env` or `processes[].env` sets `HOME`. Without it the process runs as root. |
 | `processes[].cwd` | no | An absolute path. |
 | `processes[].env` | no | Variables for this process, over `env`. |
 | `processes[].datastore` | no | Started first, before the date shift. |
@@ -166,7 +166,10 @@ quiet: [sh, -c, 'test "$(redis-cli -u "$REDIS_URL" llen bull:email:wait)$(redis-
 7. Run each `seed` command, then wait for quiet. A process that exited fails the bake.
 8. Install change capture on every table not ignored: a `miroir` schema holding the change log,
    a row trigger `miroir_capture` and a statement trigger `miroir_truncate` on each table. A
-   captured column named `_op` or `_change` is refused: the grader adds those names.
+   `database.url` role that is not a superuser is refused. So are captured names the grader's
+   SQLite copy cannot hold, in any ASCII case: two tables, or two columns of one table, with the
+   same name; a table whose evidence name starts with `sqlite_`; and a column named `_op` or
+   `_change`, which the grader adds.
 9. Stop every process in reverse order: SIGTERM, then SIGKILL after 30 s.
 10. Refuse a bake that ran past midnight UTC: each boot moves dates from the bake's day.
 11. Write `/miroir/bake.json`, create the empty `/miroir/evidence/`, and make `/miroir` private
@@ -178,7 +181,9 @@ A failure prints `bake step N, <what>: <why and the fix>` and exits 1, which fai
 ### Boot: `miroir run`, once per trial
 
 1. Read `/miroir/bake.json`.
-2. Replace `/miroir/run/` with an empty directory, so no stale ready marker survives.
+2. Make `/miroir/run/` empty, so no stale ready marker survives. If it was already there, the
+   container booted before: its dates may have moved already and its database holds that run's
+   changes, so the boot fails. A world boots once per container.
 3. Start the sinks, recording to `/miroir/run/effects.jsonl` (and faults to `faults.jsonl`).
 4. Start the datastores until ready, then wait until the database answers.
 5. Shift dates from the bake to today ([Dates](#dates)).
@@ -206,8 +211,8 @@ environment, so collect applies the manifest `env` itself.
 1. Fail if `/miroir/run/ready` is missing: the world never finished booting.
 2. Wait for quiet. A timeout is recorded as a `quiet_timeout` fault.
 3. Read the change log and the live table list in one consistent read. A database that does not
-   answer is a `database` fault, and change-log text over 64 MiB is a `log_budget` fault; either
-   way the evidence holds no changes.
+   answer is a `database` fault, and a change log over 64 MiB, counting each row's text plus
+   1 KiB, is a `log_budget` fault; either way the evidence holds no changes.
 4. Fold the log into net changes: one per changed row, with the row as the episode found it and
    as it left it. A table created, dropped or reshaped since boot, or one whose capture trigger
    is gone, is a `schema` change; a re-created table is a `truncate`.
@@ -359,15 +364,17 @@ harbor task start-env -p fixtures/acme-crm/tasks/pay-invoice
 | `<field path>: <problem>` at bake or boot | The manifest: the message names the field and the fix. |
 | `bake step 1, /miroir/bake.json: this image is already baked` | Build on the product's image, not on a world image. |
 | ``this image was not baked: add `RUN miroir bake` to its Dockerfile`` | Make `miroir bake` the last `RUN`. |
+| `boot step 2, /miroir/run: this container booted before` | A world boots once per container: start a new one from the image (`docker run`, not `docker start`). |
 | `bake step 3, datastores: …` or `boot step 4, datastores: …` | A datastore never became ready, or `database.url` does not reach it as a superuser. |
 | ``bake step 4, bake command `…`: `…` exited with status 1; its output is above`` | The command failed: its output is above the message. |
 | `process '<name>' was not ready within 60 s: … never passed` | Check the process's command, its output and its ready probe. |
 | `process '<name>' exited with status 1 before it was ready` | The process failed at start: its output is above the message. |
 | `boot step 7, process '<name>': it exited during boot (status 1)` | A worker exited once started: its output is above. |
-| `the quiet command … did not pass twice in a row within 30 s` | Background work never settles: fix the command, or turn the scheduler off. |
+| `the quiet command … did not pass twice in a row within 30 s (its last run …)` | Background work never settles: fix the command, or turn the scheduler off. The parenthesis says how the last run ended, with the last line it printed on stderr. |
 | `boot step 5, date shift: …: if a constraint refuses a moved value, list its column in database.time.exclude` | As it says. |
 | `database.time.epoch: '<glob>' matches no integer or bigint column` | Name the table as the evidence does, with `*` for any run of characters. |
 | `database.ignore: no table or column '<entry>'` | Name a table as the evidence does, or a column as `table.column`. |
+| `bake step 8, change capture: … role <name> is not a superuser …: database.url must connect as a superuser` | Connect `database.url` as a superuser, such as `postgres`. |
 | `port 5432 (db) listens on 0.0.0.0: bind it to 127.0.0.1, or list it in expose` | Bind the process to loopback. |
 | `expose lists 3000 (web), but nothing listens on it off loopback` | Make the product listen on `0.0.0.0` (the fixture sets `HOST: 0.0.0.0`). |
 | `bake step 10, the clock: the bake ran past midnight UTC` | Build again. |

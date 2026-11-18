@@ -66,8 +66,8 @@ a directory of split directories works):
   `environment_mode` is absent or `separate`;
 - a `[[verifier.collect]]` hook runs `miroir collect` in a service other than `main`, and no hook
   has a `user`;
-- `artifacts` holds `{ source = "/miroir/evidence", service = <that service> }`, and
-  `environment/docker-compose.yaml` defines the service;
+- `artifacts` holds `{ source = "/miroir/evidence", service = <that service> }` with no
+  `destination`, and `environment/docker-compose.yaml` defines the service;
 - `network_mode` in `[environment]`, `[agent]` and `[verifier]` is absent or `public`, and
   `allow_internet` is absent or `true`;
 - `solution/solve.sh` exists, and `solution/probe-N.sh` exists for exactly N = 1 to the number of
