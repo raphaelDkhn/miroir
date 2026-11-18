@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Dockerfile's miroir stage, from the static binaries the release workflow builds
 # (dist/miroir-amd64, dist/miroir-arm64) instead of a build stage.
-FROM alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f AS miroir
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS miroir
 RUN apk add --no-cache bash
 ARG TARGETARCH
 COPY dist/miroir-${TARGETARCH} /usr/local/bin/miroir
