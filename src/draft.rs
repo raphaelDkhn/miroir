@@ -2339,19 +2339,36 @@ mod tests {
         "[!-~é][ -~é]{0,5}".prop_filter("three quotes", |name| !name.contains("'''"))
     }
 
+    /// Tables a baked world can capture: bake refuses names SQLite would confuse, so names are
+    /// unique ignoring ASCII case, no column is the key or one the grader adds, and no table
+    /// name starts with `sqlite_`.
     fn shapes() -> impl Strategy<Value = Vec<Shape>> {
-        let columns = collection::btree_set(table_name(), 1..4)
-            .prop_filter("the grader's own columns and the key", |columns| {
-                !columns.iter().any(|c| ["_op", "_change", "id"].contains(&c.as_str()))
-            });
-        collection::btree_map(table_name(), (any::<bool>(), columns), 1..3).prop_map(|tables| {
-            let shape = |(name, (keyed, columns)): (String, (bool, BTreeSet<String>))| Shape {
-                name,
-                keyed,
-                columns: columns.into_iter().collect(),
-            };
-            tables.into_iter().map(shape).collect()
-        })
+        let columns = collection::btree_set(table_name(), 1..4).prop_filter(
+            "column names a baked world can capture",
+            |columns| {
+                let folded = folded(columns.iter());
+                folded.len() == columns.len()
+                    && !folded.iter().any(|c| ["_op", "_change", "id"].contains(&c.as_str()))
+            },
+        );
+        collection::btree_map(table_name(), (any::<bool>(), columns), 1..3)
+            .prop_filter("table names a baked world can capture", |tables| {
+                let folded = folded(tables.keys());
+                folded.len() == tables.len() && !folded.iter().any(|t| t.starts_with("sqlite_"))
+            })
+            .prop_map(|tables| {
+                let shape = |(name, (keyed, columns)): (String, (bool, BTreeSet<String>))| Shape {
+                    name,
+                    keyed,
+                    columns: columns.into_iter().collect(),
+                };
+                tables.into_iter().map(shape).collect()
+            })
+    }
+
+    /// `names` in ASCII lower case, as SQLite compares them.
+    fn folded<'a>(names: impl Iterator<Item = &'a String>) -> BTreeSet<String> {
+        names.map(|name| name.to_ascii_lowercase()).collect()
     }
 
     fn step(tables: usize) -> impl Strategy<Value = Step> {

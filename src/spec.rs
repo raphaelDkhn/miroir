@@ -405,7 +405,8 @@ allow:
     fn a_duplicate_key_is_refused_for_a_user() {
         let error = error("checks: [{name: a, sql: x}]\nallow: []\nallow: []\n");
         assert!(error.starts_with("the spec is not valid YAML: "), "{error}");
-        assert!(error.contains("duplicate mapping key: allow"), "{error}");
+        // serde-saphyr words it `duplicate mapping key: allow` or ``… key `allow` …``.
+        assert!(error.contains("duplicate mapping key") && error.contains("allow"), "{error}");
         assert!(!error.contains("DuplicateKeyPolicy"), "{error}");
         assert!(!error.contains('\n'), "{error}");
     }
