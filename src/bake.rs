@@ -61,9 +61,7 @@ pub async fn bake(paths: &Paths, manifest: &Manifest) -> anyhow::Result<()> {
     let captured = captured.map(|at| captured_shift(at, started)).transpose();
     let captured = captured.map_err(|e| failed(5, "database.time.captured", e))?;
     if let Some(sinks) = &manifest.sinks {
-        sinks::start(sinks, None).await.map_err(|e| {
-            failed(2, "sinks", format_args!("{e}: give sinks.smtp and sinks.http free ports"))
-        })?;
+        sinks::start(sinks, None).await.map_err(|e| failed(2, "sinks", e))?;
     }
     let supervisor = Supervisor::new(manifest.env.clone(), None);
     seed(manifest, &supervisor, captured).await?;
@@ -217,7 +215,7 @@ pub(crate) mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::manifest::{Database, DbTime};
+    use crate::manifest::{Database, DbTime, Sinks};
     use crate::pg::{Column, ColumnKind};
 
     /// A directory under the temp directory, removed with what it holds when dropped.
@@ -387,6 +385,20 @@ pub(crate) mod tests {
         assert!(error.contains("this image is already baked"), "{error}");
         assert_eq!(std::fs::read_to_string(paths.bake_info()).unwrap(), "{}");
         assert!(!paths.evidence_dir().exists(), "nothing ran");
+    }
+
+    #[tokio::test]
+    async fn a_sink_port_in_use_fails_with_the_sinks_own_fix() {
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = taken.local_addr().unwrap().port();
+        let root = temp_root("taken");
+        let mut manifest = manifest();
+        manifest.sinks = Some(Sinks { smtp: Some(port), http: None, responses: BTreeMap::new() });
+        let error = bake(&Paths::new(&*root), &manifest).await.unwrap_err().to_string();
+        let sink = format!("bake step 2, sinks: the SMTP sink cannot listen on 127.0.0.1:{port}: ");
+        assert!(error.starts_with(&sink), "{error}");
+        let fix = "; free the port, or give the sink another one in the manifest's sinks";
+        assert!(error.ends_with(fix), "{error}");
     }
 
     #[tokio::test]

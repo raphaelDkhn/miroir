@@ -91,9 +91,7 @@ async fn boot(
     let mut timing = Timing::start();
     if let Some(sinks) = &manifest.sinks {
         let recording = Recording { effects: paths.effects(), faults: paths.faults() };
-        sinks::start(sinks, Some(recording)).await.map_err(|e| {
-            failed(3, "sinks", format_args!("{e}: give sinks.smtp and sinks.http free ports"))
-        })?;
+        sinks::start(sinks, Some(recording)).await.map_err(|e| failed(3, "sinks", e))?;
     }
     let pg = Pg::new(&manifest.database);
     start_datastores(supervisor, manifest, &pg).await.map_err(|e| failed(4, "datastores", e))?;
@@ -113,9 +111,7 @@ async fn boot(
         let error = format!("it exited during boot ({}): check its output above", crash.status);
         return Err(failed(7, format_args!("process '{}'", crash.process), error));
     }
-    let listeners = listen::current().map_err(|e| {
-        failed(8, "listener audit", format_args!("cannot read /proc/net/tcp and tcp6: {e}"))
-    })?;
+    let listeners = listen::current().map_err(|e| failed(8, "listener audit", e))?;
     listen::audit(&listeners, manifest).map_err(|e| failed(8, "listener audit", e))?;
     let ready = paths.ready();
     std::fs::write(&ready, "").map_err(|e| failed(9, ready.display(), e))?;
