@@ -21,7 +21,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, anyhow, bail};
 use serde_json::{Map, Value, json};
@@ -224,8 +223,7 @@ async fn recorded(path: &Path) -> anyhow::Result<Run> {
 
 async fn record(path: &Path) -> anyhow::Result<Run> {
     let evidence = std::fs::canonicalize(path)?;
-    let scratch = Scratch::of(&evidence)?;
-    let mut conn = evidence::open(&scratch.0).await?;
+    let mut conn = evidence::open(&evidence, true).await?;
     let changes: Vec<ChangeRow> =
         sqlx::query_as("SELECT tbl, op, pk, before, after, columns FROM changes ORDER BY id")
             .fetch_all(&mut conn)
@@ -276,37 +274,6 @@ fn exact(text: &str) -> serde_json::Result<Map<String, Value>> {
         }
     }
     Ok(object)
-}
-
-/// A private copy of an evidence file, removed when dropped: `evidence::open` opens its file
-/// writable, and drafting leaves its inputs as they are.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn of(evidence: &Path) -> anyhow::Result<Scratch> {
-        static COPIES: AtomicU64 = AtomicU64::new(0);
-        let mut source = std::fs::File::open(evidence)?;
-        let copy = COPIES.fetch_add(1, Ordering::Relaxed);
-        let name = format!("miroir-draft-{}-{copy}.db", std::process::id());
-        let path = std::env::temp_dir().join(name);
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .with_context(|| format!("cannot create a copy at {}", path.display()))?;
-        let scratch = Scratch(path);
-        std::io::copy(&mut source, &mut file)
-            .with_context(|| format!("cannot copy it to {}", scratch.0.display()))?;
-        Ok(scratch)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_file(&self.0) {
-            tracing::warn!("cannot remove the evidence copy {}: {e}", self.0.display());
-        }
-    }
 }
 
 /// The op an `allow` entry admits a change by; `None` for truncate and schema changes, which no
@@ -953,6 +920,8 @@ fn scalar(sql: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use proptest::prelude::*;
     use proptest::{collection, option};
 
@@ -2257,11 +2226,6 @@ mod tests {
         let before = std::fs::read(a.join(EVIDENCE)).unwrap();
         contract(&[&a]).await;
         assert_eq!(std::fs::read(a.join(EVIDENCE)).unwrap(), before);
-        let scratch = Scratch::of(&a.join(EVIDENCE)).unwrap();
-        let copy = scratch.0.clone();
-        assert_eq!(std::fs::read(&copy).unwrap(), before);
-        drop(scratch);
-        assert!(!copy.exists());
     }
 
     #[test]

@@ -332,7 +332,7 @@ impl Evidence {
     pub fn rows(&self, sql: &'static str) -> Vec<Value> {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
-            let mut conn = miroir::evidence::open(&self.path).await.unwrap();
+            let mut conn = miroir::evidence::open(&self.path, false).await.unwrap();
             let rows: Vec<String> = sqlx::query_scalar(sql).fetch_all(&mut conn).await.unwrap();
             rows.iter().map(|row| serde_json::from_str(row).unwrap()).collect()
         })

@@ -235,7 +235,7 @@ fn read_spec(text: Option<&str>) -> Result<Spec, String> {
 /// Open a copy of the evidence at `path`, which stays as collect wrote it.
 async fn open(path: &Path) -> Result<(Scratch, SqliteConnection), String> {
     let scratch = Scratch::of(path)?;
-    let conn = evidence::open(&scratch.0)
+    let conn = evidence::open(&scratch.0, false)
         .await
         .map_err(|e| format!("cannot read the evidence {}: {e:#}", path.display()))?;
     Ok((scratch, conn))
@@ -1865,7 +1865,7 @@ allow:
         let dir = new_dir();
         let path = dir.join("evidence.db");
         evidence::write(&path, &evidence).await.unwrap();
-        let mut conn = evidence::open(&path).await.unwrap();
+        let mut conn = evidence::open(&path, false).await.unwrap();
         build(&mut conn, &evidence.tables, &answer("#12 3")).await.unwrap();
         let select = |image: &str| {
             format!(

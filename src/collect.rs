@@ -331,7 +331,7 @@ mod tests {
 
     /// The rows of `meta`, `tables`, `changes`, `sent_requests` and `faults` in an evidence file.
     async fn counts(path: &Path) -> (i64, i64, i64, i64, i64) {
-        let mut conn = evidence::open(path).await.unwrap();
+        let mut conn = evidence::open(path, false).await.unwrap();
         let counts = sqlx::query_as(
             "SELECT (SELECT count(*) FROM meta), (SELECT count(*) FROM tables), \
              (SELECT count(*) FROM changes), (SELECT count(*) FROM sent_requests), \

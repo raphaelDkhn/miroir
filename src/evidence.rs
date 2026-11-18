@@ -211,11 +211,12 @@ async fn fill(path: &Path, evidence: &Evidence) -> anyhow::Result<()> {
 
 /// Open an evidence file to read it, with statement logging off, once its `meta.format` is
 /// [`FORMAT`]. A missing file is an error and is never created; another format is an error
-/// naming both formats and the version that wrote the file. The connection is writable, since
-/// SQLite opens attached databases with the main file's flags and the grader builds `before` and
-/// `after` in attached memory databases: open a copy, never the artifact itself.
-pub async fn open(path: &Path) -> anyhow::Result<SqliteConnection> {
-    let options = SqliteConnectOptions::new().filename(path).disable_statement_logging();
+/// naming both formats and the version that wrote the file. SQLite opens attached databases with
+/// the main file's flags, so the grader, which builds `before` and `after` in attached memory
+/// databases, opens a copy writable; a reader that only selects opens the artifact `read_only`.
+pub async fn open(path: &Path, read_only: bool) -> anyhow::Result<SqliteConnection> {
+    let options =
+        SqliteConnectOptions::new().filename(path).read_only(read_only).disable_statement_logging();
     let mut conn = SqliteConnection::connect_with(&options)
         .await
         .with_context(|| format!("cannot open {}", path.display()))?;
@@ -380,7 +381,7 @@ mod tests {
     async fn written(name: &str, evidence: &Evidence) -> (PathBuf, SqliteConnection) {
         let path = new_path(name);
         write(&path, evidence).await.unwrap();
-        let conn = open(&path).await.unwrap();
+        let conn = open(&path, false).await.unwrap();
         (path, conn)
     }
 
@@ -409,7 +410,7 @@ mod tests {
         let path = new_path("tables");
         let size = write(&path, &evidence).await.unwrap();
         assert_eq!(size, std::fs::metadata(&path).unwrap().len());
-        let mut conn = open(&path).await.unwrap();
+        let mut conn = open(&path, false).await.unwrap();
 
         let meta: Vec<(String, String)> =
             rows(&mut conn, "SELECT key, value FROM meta ORDER BY key").await;
@@ -648,7 +649,7 @@ mod tests {
             .await
             .unwrap();
         conn.close().await.unwrap();
-        let error = open(&path).await.unwrap_err().to_string();
+        let error = open(&path, false).await.unwrap_err().to_string();
         assert!(error.contains("is evidence format 2, written by miroir 0.1.0"), "{error}");
         assert!(error.contains(&format!("reads format {FORMAT}")), "{error}");
         std::fs::remove_file(path).unwrap();
@@ -661,7 +662,7 @@ mod tests {
         let mut conn = SqliteConnection::connect_with(&options).await.unwrap();
         sqlx::raw_sql("CREATE TABLE notes (text TEXT)").execute(&mut conn).await.unwrap();
         conn.close().await.unwrap();
-        let error = open(&path).await.unwrap_err().to_string();
+        let error = open(&path, false).await.unwrap_err().to_string();
         assert!(error.ends_with("is not Miroir evidence"), "{error}");
         std::fs::remove_file(path).unwrap();
     }
@@ -669,7 +670,7 @@ mod tests {
     #[tokio::test]
     async fn open_never_creates_a_missing_file() {
         let path = new_path("missing");
-        let error = open(&path).await.unwrap_err().to_string();
+        let error = open(&path, false).await.unwrap_err().to_string();
         assert!(error.starts_with("cannot open"), "{error}");
         assert!(!path.exists());
     }
@@ -687,6 +688,17 @@ mod tests {
         .unwrap();
         let count: Vec<(i64,)> = rows(&mut conn, "SELECT count(*) FROM after.t").await;
         assert_eq!(count, vec![(1,)]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// `miroir draft` opens the artifact itself this way, so it cannot change it.
+    #[tokio::test]
+    async fn a_read_only_open_refuses_writes() {
+        let path = new_path("read-only");
+        write(&path, &evidence(Vec::new())).await.unwrap();
+        let mut conn = open(&path, true).await.unwrap();
+        let error = sqlx::raw_sql("DELETE FROM meta").execute(&mut conn).await.unwrap_err();
+        assert!(error.to_string().contains("readonly"), "{error}");
         std::fs::remove_file(path).unwrap();
     }
 }
