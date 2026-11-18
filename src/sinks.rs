@@ -742,6 +742,21 @@ Subject: Deal 1042 is now yours\r\nContent-Type: text/plain\r\n\r\nHello\r\n";
     }
 
     #[tokio::test]
+    async fn a_body_as_deep_as_serde_json_parses_reads_back_as_json() {
+        let (_dir, recording) = recording("deep");
+        let effects = recording.effects.clone();
+        let port = free_port();
+        let sinks = Sinks { smtp: None, http: Some(port), responses: BTreeMap::new() };
+        start(&sinks, Some(recording)).await.unwrap();
+        let deep = format!("{}{}", "[".repeat(127), "]".repeat(127));
+        let url = format!("http://127.0.0.1:{port}/hooks/deep");
+        reqwest::Client::new().post(url).body(deep.clone()).send().await.unwrap();
+        let recorded = wait_for_lines(&effects, 1).await;
+        let body: Value = serde_json::from_str(&deep).unwrap();
+        assert_eq!(recorded[0]["data"]["body"], body);
+    }
+
+    #[tokio::test]
     async fn the_journals_of_both_sinks_are_what_evidence_reads() {
         let (dir, recording) = recording("contract");
         let effects = recording.effects.clone();
