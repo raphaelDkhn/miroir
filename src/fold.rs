@@ -4,6 +4,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 
 use crate::evidence::{ChangeOp, NetChange};
@@ -67,7 +68,7 @@ struct Entry {
     after: Option<Row>,
 }
 
-/// The change log folded so far.
+/// The change log folded so far. Its rows hold each column's JSON text, which `values` parses.
 #[derive(Default)]
 struct Folding {
     /// Keyed rows by table and key.
@@ -163,8 +164,8 @@ impl Folding {
         }
         for ((tbl, _), (net, row)) in self.counts {
             let (op, before, after) = match net.cmp(&0) {
-                Ordering::Greater => (ChangeOp::Insert, None, Some(row)),
-                Ordering::Less => (ChangeOp::Delete, Some(row), None),
+                Ordering::Greater => (ChangeOp::Insert, None, Some(values(row))),
+                Ordering::Less => (ChangeOp::Delete, Some(values(row)), None),
                 Ordering::Equal => continue,
             };
             let change = NetChange { tbl, op, pk: Map::new(), before, after, columns: None };
@@ -186,15 +187,34 @@ fn primary_keys(tables: &[Table]) -> BTreeMap<String, Vec<&str>> {
     keys
 }
 
-/// A row image, without its ignored columns.
+/// A row image without its ignored columns, each column's JSON text kept as Postgres wrote it:
+/// the fold compares this text, since a double keeps about 16 digits and would hide a `numeric`
+/// change past them.
 fn image(text: Option<&str>, skip: Option<&BTreeSet<String>>) -> Result<Option<Row>, String> {
     let Some(text) = text else { return Ok(None) };
-    let mut row: Row =
+    let columns: BTreeMap<String, &RawValue> =
         serde_json::from_str(text).map_err(|e| format!("a row image is not a JSON object: {e}"))?;
-    if let Some(skip) = skip {
-        row.retain(|column, _| !skip.contains(column));
+    let mut row = Row::new();
+    for (column, value) in columns {
+        if !skip.is_some_and(|skip| skip.contains(&column)) {
+            row.insert(column, Value::String(value.get().to_string()));
+        }
     }
     Ok(Some(row))
+}
+
+/// `image` with each column's text parsed. A value `serde_json` cannot hold, nested past 127
+/// levels or a number past a double's range, stays a JSON string of its text: the agent can write
+/// one through a json, jsonb or numeric column, so it must be scored, never fail collect.
+fn values(mut image: Row) -> Row {
+    for value in image.values_mut() {
+        if let Value::String(text) = value
+            && let Ok(parsed) = serde_json::from_str(text)
+        {
+            *value = parsed;
+        }
+    }
+    image
 }
 
 /// The primary key of `row`.
@@ -219,7 +239,8 @@ fn net_change(tbl: String, entry: Entry) -> Option<NetChange> {
             (ChangeOp::Update, Some(changed))
         }
     };
-    Some(NetChange { tbl, op, pk: entry.pk, before: entry.before, after: entry.after, columns })
+    let (pk, before, after) = (values(entry.pk), entry.before.map(values), entry.after.map(values));
+    Some(NetChange { tbl, op, pk, before, after, columns })
 }
 
 /// The keys whose values differ between two objects, sorted.
@@ -528,6 +549,72 @@ mod tests {
         let texts: Vec<&str> =
             changes.iter().map(|c| c.after.as_ref().unwrap()["text"].as_str().unwrap()).collect();
         assert_eq!(texts, ["edited", "second", "third"]);
+    }
+
+    /// A log row whose images are given as Postgres wrote them.
+    fn raw(tbl: &str, op: &str, old: Option<&str>, new: Option<&str>) -> LogRow {
+        LogRow {
+            tbl: tbl.into(),
+            op: op.into(),
+            old: old.map(Into::into),
+            new: new.map(Into::into),
+        }
+    }
+
+    /// `numeric` keeps every digit it was given; compared as doubles, these changes would vanish.
+    #[test]
+    fn a_change_past_a_doubles_digits_counts() {
+        let tables = [table("wallets", &["id"], &["id", "wei"]), table("ledger", &[], &["amount"])];
+        let rows = [
+            raw(
+                "wallets",
+                "update",
+                Some(r#"{"id": 1, "wei": 1000000000000000000000}"#),
+                Some(r#"{"id": 1, "wei": 1000000000000000000001}"#),
+            ),
+            raw("wallets", "insert", None, Some(r#"{"id": 100000000000000000001, "wei": 0}"#)),
+            raw("wallets", "insert", None, Some(r#"{"id": 100000000000000000002, "wei": 0}"#)),
+            raw(
+                "ledger",
+                "update",
+                Some(r#"{"amount": 1234567890.1234567891}"#),
+                Some(r#"{"amount": 1234567890.1234567892}"#),
+            ),
+        ];
+        let changes = fold(&rows, &tables, &Ignore::default()).unwrap();
+        let ops: Vec<(&str, ChangeOp)> = changes.iter().map(|c| (c.tbl.as_str(), c.op)).collect();
+        let expected = [
+            ("wallets", ChangeOp::Update),
+            ("wallets", ChangeOp::Insert),
+            ("wallets", ChangeOp::Insert),
+            ("ledger", ChangeOp::Delete),
+            ("ledger", ChangeOp::Insert),
+        ];
+        assert_eq!(ops, expected, "two keys a double cannot tell apart stay two rows");
+        assert_eq!(changes[0].columns, Some(vec!["wei".to_string()]));
+    }
+
+    /// The agent writes json, jsonb and numeric values, so one `serde_json` cannot hold must be
+    /// scored as a change, never fail the fold and void the trial.
+    #[test]
+    fn a_value_serde_json_cannot_hold_is_kept_as_its_text() {
+        let tables = [table("settings", &["id"], &["id", "data"])];
+        let nested = |depth: usize| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        let insert = |data: &str| {
+            let new = format!(r#"{{"id": 1, "data": {data}}}"#);
+            raw("settings", "insert", None, Some(&new))
+        };
+        let past_a_double = format!("1{}", "0".repeat(400));
+        for data in [nested(128), past_a_double] {
+            let changes = fold(&[insert(&data)], &tables, &Ignore::default()).unwrap();
+            let after = changes[0].after.as_ref().unwrap();
+            assert_eq!((&after["id"], &after["data"]), (&json!(1), &Value::String(data)));
+        }
+        let changes = fold(&[insert(&nested(127))], &tables, &Ignore::default()).unwrap();
+        assert!(changes[0].after.as_ref().unwrap()["data"].is_array(), "127 levels still parse");
+        let ignore = ignoring(&[], &[("settings", "data")]);
+        let changes = fold(&[insert(&nested(128))], &tables, &ignore).unwrap();
+        assert_eq!(changes[0].after, Some(object(json!({"id": 1}))));
     }
 
     /// A check compares a value with the literal the database holds, so every double must read
