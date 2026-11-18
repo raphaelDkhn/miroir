@@ -553,8 +553,12 @@ struct Draft {
     suffixes: BTreeMap<String, usize>,
     /// The paste-ready `allow` lines, in evidence order.
     allow: Vec<String>,
+    /// The lines in `allow`.
+    allowed: BTreeSet<String>,
     /// What only some runs did, and what is checked or allowed whatever its values.
     notes: Vec<String>,
+    /// The notes in `notes`.
+    noted: BTreeSet<String>,
     /// `table.column` for each value that differs between runs.
     varying: BTreeSet<String>,
     /// `table.column` for each value that is the key of a row a run inserted, with its tables.
@@ -733,14 +737,14 @@ impl Draft {
 
     /// Add an `allow` line, unless the same line is drafted.
     fn allow(&mut self, line: String) {
-        if !self.allow.contains(&line) {
+        if self.allowed.insert(line.clone()) {
             self.allow.push(line);
         }
     }
 
     /// Add a note, unless the same note is there.
     fn note(&mut self, note: String) {
-        if !self.notes.contains(&note) {
+        if self.noted.insert(note.clone()) {
             self.notes.push(note);
         }
     }
