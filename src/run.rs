@@ -28,7 +28,14 @@ pub(crate) const STOP_LIMIT: Duration = Duration::from_secs(30);
 pub async fn run(paths: &Paths, manifest: &Manifest) -> anyhow::Result<()> {
     let info = baked(&paths.bake_info())?;
     let run_dir = paths.run_dir();
+    // The image never holds the runtime directory, so only an earlier boot made it.
+    let booted_before = run_dir.exists();
     fresh_run_dir(&run_dir).map_err(|e| failed(2, run_dir.display(), e))?;
+    if booted_before {
+        let error = "this container booted before, so its dates may have moved already and its \
+                     database holds that run's changes: start a new container from the image";
+        return Err(failed(2, run_dir.display(), error));
+    }
     let mut terminate = signal(SignalKind::terminate()).context("cannot watch for SIGTERM")?;
     let supervisor = Supervisor::new(manifest.env.clone(), Some(paths.faults()));
     tokio::select! {
@@ -84,9 +91,7 @@ async fn boot(
     let mut timing = Timing::start();
     if let Some(sinks) = &manifest.sinks {
         let recording = Recording { effects: paths.effects(), faults: paths.faults() };
-        sinks::start(sinks, Some(recording)).await.map_err(|e| {
-            failed(3, "sinks", format_args!("{e}: give sinks.smtp and sinks.http free ports"))
-        })?;
+        sinks::start(sinks, Some(recording)).await.map_err(|e| failed(3, "sinks", e))?;
     }
     let pg = Pg::new(&manifest.database);
     start_datastores(supervisor, manifest, &pg).await.map_err(|e| failed(4, "datastores", e))?;
@@ -106,9 +111,7 @@ async fn boot(
         let error = format!("it exited during boot ({}): check its output above", crash.status);
         return Err(failed(7, format_args!("process '{}'", crash.process), error));
     }
-    let listeners = listen::current().map_err(|e| {
-        failed(8, "listener audit", format_args!("cannot read /proc/net/tcp and tcp6: {e}"))
-    })?;
+    let listeners = listen::current().map_err(|e| failed(8, "listener audit", e))?;
     listen::audit(&listeners, manifest).map_err(|e| failed(8, "listener audit", e))?;
     let ready = paths.ready();
     std::fs::write(&ready, "").map_err(|e| failed(9, ready.display(), e))?;
@@ -247,6 +250,24 @@ mod tests {
         std::fs::write(paths.bake_info(), serde_json::to_vec(&info).unwrap()).unwrap();
         let read = baked(&paths.bake_info()).unwrap();
         assert_eq!((read.baked_at, read.miroir.as_str()), (baked_at, "0.1.0"));
+    }
+
+    #[tokio::test]
+    async fn a_container_that_booted_before_refuses_to_boot_again() {
+        let root = temp_root("rebooted");
+        let paths = Paths::new(&*root);
+        let info = BakeInfo { baked_at: Timestamp::now(), miroir: "0.1.0".into() };
+        std::fs::write(paths.bake_info(), serde_json::to_vec(&info).unwrap()).unwrap();
+        std::fs::create_dir(paths.run_dir()).unwrap();
+        std::fs::write(paths.ready(), "").unwrap();
+        let error = run(&paths, &manifest()).await.unwrap_err().to_string();
+        let dir = paths.run_dir().display().to_string();
+        let refusal = format!("boot step 2, {dir}: this container booted before, ");
+        assert!(error.starts_with(&refusal), "{error}");
+        assert!(error.ends_with(": start a new container from the image"), "{error}");
+        assert_eq!(std::fs::read_dir(paths.run_dir()).unwrap().count(), 0, "no stale marker");
+        let again = run(&paths, &manifest()).await.unwrap_err().to_string();
+        assert!(again.starts_with(&refusal), "every later boot refuses too: {again}");
     }
 
     #[test]

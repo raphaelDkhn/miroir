@@ -1,6 +1,7 @@
 //! `miroir bake` (§3.4), the last `RUN` of a world Dockerfile: seed the world, install change
 //! capture, and record the bake.
 
+use std::collections::{BTreeSet, HashSet};
 use std::fmt::Display;
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
@@ -60,9 +61,7 @@ pub async fn bake(paths: &Paths, manifest: &Manifest) -> anyhow::Result<()> {
     let captured = captured.map(|at| captured_shift(at, started)).transpose();
     let captured = captured.map_err(|e| failed(5, "database.time.captured", e))?;
     if let Some(sinks) = &manifest.sinks {
-        sinks::start(sinks, None).await.map_err(|e| {
-            failed(2, "sinks", format_args!("{e}: give sinks.smtp and sinks.http free ports"))
-        })?;
+        sinks::start(sinks, None).await.map_err(|e| failed(2, "sinks", e))?;
     }
     let supervisor = Supervisor::new(manifest.env.clone(), None);
     seed(manifest, &supervisor, captured).await?;
@@ -126,37 +125,50 @@ fn running(supervisor: &Supervisor, step: u8) -> anyhow::Result<()> {
 async fn capture(pg: &Pg) -> anyhow::Result<()> {
     let tables = pg.catalog().await.map_err(|e| failed(8, "the catalog", e))?;
     let ignore = pg.ignore(&tables).map_err(|e| failed(8, "database.ignore", e))?;
-    reserved_columns(&tables, &ignore).map_err(|e| failed(8, "captured columns", e))?;
+    sqlite_names(&tables, &ignore).map_err(|e| failed(8, "captured names", e))?;
     pg.install_capture(&tables, &ignore).await.map_err(|e| {
         failed(8, "change capture", format_args!("{e}: database.url must connect as a superuser"))
     })?;
     pg.clear_log().await.map_err(|e| failed(8, "miroir.log", e))
 }
 
-/// Refuse a captured column named like a column the grader adds to every row image.
-fn reserved_columns(tables: &[Table], ignore: &Ignore) -> Result<(), String> {
-    let mut clashes = Vec::new();
+/// Refuse captured names the grader's SQLite copy of the tables cannot hold.
+fn sqlite_names(tables: &[Table], ignore: &Ignore) -> Result<(), String> {
+    let (mut clashes, mut names) = (Vec::new(), HashSet::new());
     for table in tables {
         let name = table.evidence_name();
         if ignore.tables.contains(&name) {
             continue;
         }
-        let ignored = ignore.columns.get(&name);
-        for column in &table.columns {
-            let captured = !ignored.is_some_and(|columns| columns.contains(&column.name));
-            if captured && RESERVED.contains(&column.name.as_str()) {
-                clashes.push(format!("{name}.{}", column.name));
-            }
+        let folded = name.to_ascii_lowercase();
+        if folded.starts_with("sqlite_") || !names.insert(folded) {
+            clashes.push(name.clone());
         }
+        clashes.extend(column_clashes(table, &name, ignore.columns.get(&name)));
     }
     if clashes.is_empty() {
         return Ok(());
     }
     Err(format!(
-        "{}: the grader adds _op and _change to every row image, so no captured column may have \
-         either name: rename the column, or add it to database.ignore",
+        "{}: the grader copies captured tables into SQLite, which ignores ASCII case in names and \
+         reserves table names starting sqlite_, and adds the columns _op and _change to every \
+         row image: rename each, or add it to database.ignore",
         clashes.join(", ")
     ))
+}
+
+/// The captured columns of `table` equal, ignoring ASCII case, to an earlier one or to a
+/// column the grader adds.
+fn column_clashes(table: &Table, name: &str, ignored: Option<&BTreeSet<String>>) -> Vec<String> {
+    let mut seen: HashSet<String> = RESERVED.map(String::from).into();
+    let mut clashes = Vec::new();
+    for column in &table.columns {
+        let captured = !ignored.is_some_and(|ignored| ignored.contains(&column.name));
+        if captured && !seen.insert(column.name.to_ascii_lowercase()) {
+            clashes.push(format!("{name}.{}", column.name));
+        }
+    }
+    clashes
 }
 
 /// Step 10: refuse a bake that ran past midnight UTC, because each boot moves dates by calendar
@@ -200,9 +212,10 @@ fn failed(step: u8, at: impl Display, error: impl Display) -> anyhow::Error {
 pub(crate) mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::manifest::{Database, DbTime};
+    use crate::manifest::{Database, DbTime, Sinks};
     use crate::pg::{Column, ColumnKind};
 
     /// A directory under the temp directory, removed with what it holds when dropped.
@@ -222,12 +235,17 @@ pub(crate) mod tests {
         }
     }
 
+    /// Numbers the temp roots of this process: tests run in parallel, and the clock alone can
+    /// give two of them one name.
+    static ROOTS: AtomicUsize = AtomicUsize::new(0);
+
     /// A new, empty directory under the temp directory.
     pub(crate) fn temp_root(name: &str) -> TempRoot {
         let nanos =
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let n = ROOTS.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir()
-            .join(format!("miroir-world-{name}-{}-{nanos}", std::process::id()));
+            .join(format!("miroir-world-{name}-{}-{n}-{nanos}", std::process::id()));
         std::fs::create_dir(&dir).unwrap();
         TempRoot(dir)
     }
@@ -306,15 +324,31 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_captured_column_named_op_or_change_is_refused() {
+    fn captured_columns_sqlite_cannot_tell_apart_are_refused() {
         let notes = table("notes", &["id", "_op", "text", "_change"]);
-        let error = reserved_columns(std::slice::from_ref(&notes), &Ignore::default());
+        let error = sqlite_names(std::slice::from_ref(&notes), &Ignore::default());
         let error = error.unwrap_err();
         let name = notes.evidence_name();
         assert!(error.starts_with(&format!("{name}._op, {name}._change: ")), "{error}");
-        assert!(error.ends_with("rename the column, or add it to database.ignore"), "{error}");
+        assert!(error.ends_with("rename each, or add it to database.ignore"), "{error}");
+        let cased = table("notes", &["Id", "id", "_OP", "_Change"]);
+        let error = sqlite_names(&[cased], &Ignore::default()).unwrap_err();
+        assert!(error.starts_with("notes.id, notes._OP, notes._Change: "), "{error}");
         let plain = table("deals", &["id", "op", "change"]);
-        assert_eq!(reserved_columns(&[plain], &Ignore::default()), Ok(()));
+        assert_eq!(sqlite_names(&[plain], &Ignore::default()), Ok(()));
+    }
+
+    #[test]
+    fn tables_sqlite_cannot_tell_apart_or_reserves_are_refused() {
+        let mut audit = table("sqlite_stat1", &["id"]);
+        audit.schema = "audit".into();
+        let tables =
+            [table("User", &["id"]), table("user", &["id"]), table("SQLite_stat1", &["id"]), audit];
+        let error = sqlite_names(&tables, &Ignore::default()).unwrap_err();
+        assert!(error.starts_with("user, SQLite_stat1: "), "{error}");
+        let mut ignore = Ignore::default();
+        ignore.tables.extend(["user".to_string(), "SQLite_stat1".to_string()]);
+        assert_eq!(sqlite_names(&tables, &ignore), Ok(()), "audit.sqlite_stat1 is allowed");
     }
 
     #[test]
@@ -323,10 +357,10 @@ pub(crate) mod tests {
         let name = notes.evidence_name();
         let mut ignore = Ignore::default();
         ignore.tables.insert(name.clone());
-        assert_eq!(reserved_columns(std::slice::from_ref(&notes), &ignore), Ok(()));
+        assert_eq!(sqlite_names(std::slice::from_ref(&notes), &ignore), Ok(()));
         let mut ignore = Ignore::default();
         ignore.columns.insert(name.clone(), BTreeSet::from(["_op".to_string()]));
-        let error = reserved_columns(&[notes], &ignore).unwrap_err();
+        let error = sqlite_names(&[notes], &ignore).unwrap_err();
         assert!(error.starts_with(&format!("{name}._change: ")), "only _change is captured");
     }
 
@@ -351,6 +385,20 @@ pub(crate) mod tests {
         assert!(error.contains("this image is already baked"), "{error}");
         assert_eq!(std::fs::read_to_string(paths.bake_info()).unwrap(), "{}");
         assert!(!paths.evidence_dir().exists(), "nothing ran");
+    }
+
+    #[tokio::test]
+    async fn a_sink_port_in_use_fails_with_the_sinks_own_fix() {
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = taken.local_addr().unwrap().port();
+        let root = temp_root("taken");
+        let mut manifest = manifest();
+        manifest.sinks = Some(Sinks { smtp: Some(port), http: None, responses: BTreeMap::new() });
+        let error = bake(&Paths::new(&*root), &manifest).await.unwrap_err().to_string();
+        let sink = format!("bake step 2, sinks: the SMTP sink cannot listen on 127.0.0.1:{port}: ");
+        assert!(error.starts_with(&sink), "{error}");
+        let fix = "; free the port, or give the sink another one in the manifest's sinks";
+        assert!(error.ends_with(fix), "{error}");
     }
 
     #[tokio::test]

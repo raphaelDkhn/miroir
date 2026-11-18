@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
-use std::process::{ExitStatus, Stdio};
+use std::process::{ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -122,8 +122,12 @@ impl Supervisor {
             command.current_dir(cwd);
         }
         if let Some(user) = &process.user {
-            let (uid, gid) = user_ids(user).await.map_err(failed)?;
+            let (uid, gid, home) = user_ids(user).await.map_err(failed)?;
             command.uid(uid).gid(gid);
+            // As su-exec, gosu and Docker's USER do; a HOME in either env still wins.
+            if !self.env.contains_key("HOME") && !process.env.contains_key("HOME") {
+                command.env("HOME", home);
+            }
         }
         let child =
             command.spawn().map_err(|e| failed(format!("{e}; check its command, cwd and user")))?;
@@ -203,10 +207,10 @@ impl Supervisor {
                 "`{shown}` did not finish within {} s, so it was killed",
                 limit.as_secs()
             ))),
-            Ok(Some(status)) if status.success() => Ok(()),
-            Ok(Some(status)) => Err(SupervisorError::Command(format!(
+            Ok(Some(output)) if output.status.success() => Ok(()),
+            Ok(Some(output)) => Err(SupervisorError::Command(format!(
                 "`{shown}` exited with {}; its output is above",
-                described(status)
+                described(output.status)
             ))),
         }
     }
@@ -250,15 +254,20 @@ impl Supervisor {
         limit: Duration,
     ) -> Result<Option<String>, SupervisorError> {
         let mut command = self.command(argv);
-        command.stdout(Stdio::null()).stderr(Stdio::null());
+        // Its stderr says why it failed; a child left holding it open makes the run time out.
+        command.stdout(Stdio::null()).stderr(Stdio::piped());
         match bounded(command, limit).await {
             Err(e) => Err(SupervisorError::Spawn(format!(
                 "cannot run the quiet command `{}`: {e}; check that its program is installed \
                  and on PATH",
                 argv.join(" ")
             ))),
-            Ok(Some(status)) if status.success() => Ok(None),
-            Ok(Some(status)) => Ok(Some(format!("its last run exited with {}", described(status)))),
+            Ok(Some(output)) if output.status.success() => Ok(None),
+            Ok(Some(output)) => Ok(Some(format!(
+                "its last run exited with {}{}",
+                described(output.status),
+                last_line(&output.stderr)
+            ))),
             Ok(None) => Ok(Some("its last run was killed at the limit".into())),
         }
     }
@@ -358,15 +367,15 @@ async fn record_crash(faults: PathBuf, name: &str, status: &str) {
 }
 
 /// Run `command` until it exits or `limit` passes; then its process group is killed and the
-/// result is `None`.
-async fn bounded(mut command: Command, limit: Duration) -> std::io::Result<Option<ExitStatus>> {
-    let mut child = command.kill_on_drop(true).spawn()?;
+/// result is `None`. Only the streams given `Stdio::piped()` are read into the output.
+async fn bounded(mut command: Command, limit: Duration) -> std::io::Result<Option<Output>> {
+    let child = command.kill_on_drop(true).spawn()?;
     let pid = pid(&child);
     if let Some(pid) = pid {
         deprioritize(pid)?;
     }
-    if let Ok(status) = timeout(limit, child.wait()).await {
-        return status.map(Some);
+    if let Ok(output) = timeout(limit, child.wait_with_output()).await {
+        return output.map(Some);
     }
     if let Some(pid) = pid {
         signal(pid, Signal::KILL);
@@ -396,6 +405,13 @@ fn deprioritize(pid: Pid) -> std::io::Result<()> {
     Ok(())
 }
 
+/// `: <the last line>` of what a command printed, or nothing when it printed none.
+fn last_line(printed: &[u8]) -> String {
+    let text = String::from_utf8_lossy(printed);
+    let last = text.lines().map(str::trim).rfind(|line| !line.is_empty());
+    last.map(|line| format!(": {line}")).unwrap_or_default()
+}
+
 /// `status N`, or `signal N` when a signal ended the process.
 fn described(status: ExitStatus) -> String {
     match (status.code(), status.signal()) {
@@ -405,25 +421,25 @@ fn described(status: ExitStatus) -> String {
     }
 }
 
-/// The uid and gid of `user`, from `/etc/passwd`.
-async fn user_ids(user: &str) -> Result<(u32, u32), String> {
+/// The uid, gid and home directory of `user`, from `/etc/passwd`.
+async fn user_ids(user: &str) -> Result<(u32, u32, String), String> {
     let passwd = tokio::fs::read("/etc/passwd")
         .await
         .map_err(|e| format!("cannot read /etc/passwd to find user '{user}': {e}"))?;
     passwd_ids(&String::from_utf8_lossy(&passwd), user)
 }
 
-fn passwd_ids(passwd: &str, user: &str) -> Result<(u32, u32), String> {
+fn passwd_ids(passwd: &str, user: &str) -> Result<(u32, u32, String), String> {
     for line in passwd.lines() {
         let fields: Vec<&str> = line.split(':').collect();
-        let [name, _, uid, gid, ..] = fields.as_slice() else { continue };
+        let [name, _, uid, gid, _, home, ..] = fields.as_slice() else { continue };
         if *name != user {
             continue;
         }
         let number = |id: &str| {
             id.parse().map_err(|_| format!("user '{user}' has '{id}' as an id in /etc/passwd"))
         };
-        return Ok((number(uid)?, number(gid)?));
+        return Ok((number(uid)?, number(gid)?, (*home).to_string()));
     }
     Err(format!("no user '{user}' in /etc/passwd; create it in the world's Dockerfile"))
 }
@@ -434,6 +450,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::bake::tests::temp_root;
 
     const LONG: Duration = Duration::from_secs(10);
 
@@ -455,16 +472,6 @@ mod tests {
 
     fn supervisor() -> Supervisor {
         Supervisor::new(BTreeMap::new(), None)
-    }
-
-    /// A new directory of this test's own.
-    fn scratch(name: &str) -> PathBuf {
-        let nanos =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("miroir-sup-{name}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
     }
 
     /// A loopback TCP port that nothing listens on.
@@ -511,7 +518,7 @@ mod tests {
 
     #[tokio::test]
     async fn processes_start_in_order_each_after_the_previous_one_is_ready() {
-        let dir = scratch("order");
+        let dir = temp_root("order");
         let order = dir.join("order");
         let port = free_port();
         let first = process(
@@ -542,7 +549,6 @@ mod tests {
         eventually("second started", || read(&order).contains("second")).await;
         assert_eq!(read(&order), "first\nready\nsecond\n");
         supervisor.stop(LONG).await.unwrap();
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -630,8 +636,8 @@ mod tests {
                       short:x:1\n\
                       postgres:x:70:71:PostgreSQL:/var/lib/postgresql:/bin/sh\n\
                       broken:x:abc:1::/:/bin/sh\n";
-        assert_eq!(passwd_ids(passwd, "root"), Ok((0, 0)));
-        assert_eq!(passwd_ids(passwd, "postgres"), Ok((70, 71)));
+        assert_eq!(passwd_ids(passwd, "root"), Ok((0, 0, "/root".into())));
+        assert_eq!(passwd_ids(passwd, "postgres"), Ok((70, 71, "/var/lib/postgresql".into())));
         let error = passwd_ids(passwd, "broken").unwrap_err();
         assert_eq!(error, "user 'broken' has 'abc' as an id in /etc/passwd");
         let error = passwd_ids(passwd, "short").unwrap_err();
@@ -641,7 +647,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_manifest_env_overrides_the_parents_and_a_process_env_overrides_both() {
-        let dir = scratch("env");
+        let dir = temp_root("env");
         let out = dir.join("out");
         let env: BTreeMap<String, String> =
             [("HOME", "/manifest-home"), ("BOTH", "manifest"), ("ONLY", "m")]
@@ -658,18 +664,17 @@ mod tests {
             None,
         );
         web.env.insert("BOTH".into(), "process".into());
-        web.cwd = Some(dir.clone());
+        web.cwd = Some(dir.to_path_buf());
         supervisor.start(&[&web], LONG).await.unwrap();
         eventually("web wrote its environment", || read(&out).ends_with('\n')).await;
         let pwd = dir.canonicalize().unwrap();
         assert_eq!(read(&out), format!("process m /manifest-home {}\n", pwd.display()));
         supervisor.stop(LONG).await.unwrap();
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
     async fn a_crash_appends_one_fault_line() {
-        let dir = scratch("crash");
+        let dir = temp_root("crash");
         let faults = dir.join("faults.jsonl");
         let supervisor = Supervisor::new(BTreeMap::new(), Some(faults.clone()));
         let worker = process("worker", "sleep 0.1; exit 1", None);
@@ -686,7 +691,6 @@ mod tests {
             ]
         );
         supervisor.stop(LONG).await.unwrap();
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -700,7 +704,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_ends_every_child_in_reverse_order_and_records_no_crash() {
-        let dir = scratch("stop");
+        let dir = temp_root("stop");
         let (order, faults) = (dir.join("order"), dir.join("faults.jsonl"));
         let script = |name: &str| {
             format!(
@@ -723,12 +727,11 @@ mod tests {
         sleep(Duration::from_millis(100)).await;
         assert!(supervisor.crash().is_none());
         assert_eq!(journal::read(&faults).unwrap(), Vec::<serde_json::Value>::new());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
     async fn stop_kills_what_ignores_sigterm_past_the_limit() {
-        let dir = scratch("stubborn");
+        let dir = temp_root("stubborn");
         let trapped = dir.join("trapped");
         let script = format!(
             "trap '' TERM; echo trapped > '{}'; while :; do sleep 0.05; done",
@@ -740,7 +743,6 @@ mod tests {
         supervisor.start(&[&quick, &stubborn], LONG).await.unwrap();
         let started_pids = pids(&supervisor);
         eventually("stubborn ignores SIGTERM", || trapped.exists()).await;
-        std::fs::remove_dir_all(dir).unwrap();
         let started = Instant::now();
         supervisor.stop(Duration::from_secs(1)).await.unwrap();
         let elapsed = started.elapsed();
@@ -752,7 +754,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_command_past_its_limit_is_killed_with_its_children() {
-        let dir = scratch("limit");
+        let dir = temp_root("limit");
         let child = dir.join("child");
         let hung = sh(&format!("sleep 30 & echo $! > '{}'; wait", child.display()));
         let started = Instant::now();
@@ -763,7 +765,6 @@ mod tests {
         let pid: i32 = read(&child).trim().parse().unwrap();
         let pid = Pid::from_raw(pid).unwrap();
         eventually("the command's child was killed", || is_gone(pid)).await;
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -781,7 +782,7 @@ mod tests {
 
     #[tokio::test]
     async fn quiet_needs_two_passes_in_a_row() {
-        let dir = scratch("quiet");
+        let dir = temp_root("quiet");
         let runs = dir.join("runs");
         let quiet = sh(&format!(
             "n=$(cat '{0}' 2>/dev/null || echo 0); n=$((n + 1)); echo $n > '{0}'; [ $n -ne 2 ]",
@@ -791,7 +792,6 @@ mod tests {
         supervisor().wait_quiet(Some(&quiet), LONG).await.unwrap();
         assert_eq!(read(&runs), "4\n", "pass, fail, then two passes in a row");
         assert!(started.elapsed() >= QUIET_INTERVAL * 3, "runs start 200 ms apart");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -821,6 +821,10 @@ mod tests {
         let error =
             supervisor().wait_quiet(Some(&sh("exit 3")), Duration::from_secs(1)).await.unwrap_err();
         assert!(error.to_string().contains("(its last run exited with status 3)"), "{error}");
+        let said = sh("echo starting >&2; echo 'queue unreachable ' >&2; echo >&2; exit 3");
+        let error = supervisor().wait_quiet(Some(&said), Duration::from_secs(1)).await.unwrap_err();
+        let reason = "(its last run exited with status 3: queue unreachable)";
+        assert!(error.to_string().contains(reason), "{error}");
         let missing = vec!["/nonexistent/miroir-quiet".to_string()];
         let started = Instant::now();
         let error = supervisor().wait_quiet(Some(&missing), LONG).await.unwrap_err();

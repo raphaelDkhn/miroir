@@ -12,6 +12,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 
+use serde::Deserialize;
 use serde_json::Value;
 
 /// Append one line, under an exclusive lock, with `O_APPEND`, so a concurrent `clear` or a
@@ -37,13 +38,23 @@ pub fn read(path: &Path) -> std::io::Result<Vec<Value>> {
     file.read_to_string(&mut text)?;
     let mut values = Vec::new();
     for (number, line) in (1..).zip(text.lines()) {
-        let value = serde_json::from_str(line).map_err(|e| {
+        let value = parse(line).map_err(|e| {
             let message = format!("{} line {number} is not JSON: {e}", path.display());
             std::io::Error::new(ErrorKind::InvalidData, message)
         })?;
         values.push(value);
     }
     Ok(values)
+}
+
+/// One line's value, with no depth limit: a sink keeps a request body as deep as `serde_json`
+/// parses one, 127 levels, and the line nests it two levels deeper.
+fn parse(line: &str) -> serde_json::Result<Value> {
+    let mut parser = serde_json::Deserializer::from_str(line);
+    parser.disable_recursion_limit();
+    let value = Value::deserialize(&mut parser)?;
+    parser.end()?;
+    Ok(value)
 }
 
 /// Empty the journal, under the lock; a missing file is already empty.
@@ -115,12 +126,14 @@ mod tests {
     #[test]
     fn a_line_that_is_not_json_is_an_error_naming_it() {
         let path = new_path("garbage");
-        std::fs::write(&path, "{\"n\":1}\n{\"n\":\n").unwrap();
-        let error = read(&path).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidData);
-        let message = error.to_string();
-        assert!(message.starts_with(&path.display().to_string()), "{message}");
-        assert!(message.contains(" line 2 is not JSON: "), "{message}");
+        for garbage in ["{\"n\":", "{\"n\":2} 3"] {
+            std::fs::write(&path, format!("{{\"n\":1}}\n{garbage}\n")).unwrap();
+            let error = read(&path).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidData);
+            let message = error.to_string();
+            assert!(message.starts_with(&path.display().to_string()), "{message}");
+            assert!(message.contains(" line 2 is not JSON: "), "{message}");
+        }
         std::fs::remove_file(path).unwrap();
     }
 
