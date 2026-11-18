@@ -13,8 +13,12 @@ use tokio::time::{Instant, sleep, timeout};
 
 use crate::manifest::{Database, EpochUnit};
 
-/// The most bytes of change-log row text (`old::text` plus `new::text`) collect reads.
+/// The most change log collect reads, in bytes: each row's text (`old::text` plus `new::text`)
+/// plus `LOG_ROW_COST`.
 pub const LOG_BUDGET: u64 = 64 * 1024 * 1024;
+/// Read and folded, a row takes a kilobyte or more however little text it has, and a truncate
+/// rescans the rows folded so far, so no row reads for free.
+const LOG_ROW_COST: u64 = 1024;
 
 const PING_LIMIT: Duration = Duration::from_secs(5);
 const CONNECT_LIMIT: Duration = Duration::from_secs(30);
@@ -160,7 +164,7 @@ pub struct Snapshot {
 pub enum PgError {
     #[error("the database does not answer: {0}")]
     Unreachable(String),
-    #[error("the change log's text passed its {budget}-byte budget after {rows} rows")]
+    #[error("the change log passed its {budget}-byte budget after {rows} rows")]
     OverBudget { rows: u64, budget: u64 },
     #[error("{0}")]
     Sql(String),
@@ -298,7 +302,7 @@ impl Pg {
 
     /// The live catalog, then `SELECT tbl, op, old::text, new::text FROM miroir.log ORDER BY
     /// seq` streamed, in one REPEATABLE READ READ ONLY transaction. Stops with `OverBudget` as
-    /// soon as the text read passes `budget`, so memory stays within the budget plus one row.
+    /// soon as the rows read pass `budget`, each counted as [`LOG_BUDGET`] says.
     pub async fn snapshot(&self, budget: u64) -> Result<Snapshot, PgError> {
         let mut conn = connect(&self.database.url).await?;
         sqlx::raw_sql("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -636,7 +640,7 @@ fn literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-/// The change log in order; `OverBudget` once its text passes `budget`, the rest left unread
+/// The change log in order; `OverBudget` once its rows pass `budget`, the rest left unread
 /// (the connection is then dropped, never drained).
 async fn read_log(conn: &mut PgConnection, budget: u64) -> Result<Vec<LogRow>, PgError> {
     let mut read = Read::default();
@@ -668,9 +672,10 @@ struct Read {
 }
 
 impl Read {
-    /// Count `row`; an error, which stops the read, once the text read passes `budget`.
+    /// Count `row`; an error, which stops the read, once the rows read pass `budget`.
     fn take(&mut self, row: LogRow, budget: u64) -> Result<LogRow, sqlx::Error> {
         self.rows += 1;
+        self.bytes = self.bytes.saturating_add(LOG_ROW_COST);
         for text in [&row.old, &row.new].into_iter().flatten() {
             self.bytes = self.bytes.saturating_add(u64::try_from(text.len()).unwrap_or(u64::MAX));
         }
@@ -1082,23 +1087,24 @@ mod tests {
     }
 
     #[test]
-    fn a_log_read_stops_once_its_text_passes_the_budget() {
+    fn a_log_read_stops_once_its_rows_pass_the_budget() {
         let row = |old: Option<&str>, new: Option<&str>| LogRow {
             tbl: "notes".into(),
             op: "update".into(),
             old: old.map(str::to_string),
             new: new.map(str::to_string),
         };
+        let budget = 3 * LOG_ROW_COST + 20;
         let mut read = Read::default();
-        let first = read.take(row(Some("{\"a\":1}"), Some("{\"a\":2}")), 20).unwrap();
+        let first = read.take(row(Some("{\"a\":1}"), Some("{\"a\":2}")), budget).unwrap();
         assert_eq!(first.new.as_deref(), Some("{\"a\":2}"));
-        assert_eq!((read.rows, read.bytes), (1, 14));
-        read.take(row(None, None), 20).unwrap();
-        assert_eq!((read.rows, read.bytes), (2, 14), "a truncate holds no text");
-        read.take(row(None, Some("{\"bb\"}")), 20).unwrap();
-        assert_eq!((read.rows, read.bytes), (3, 20), "exactly the budget still fits");
-        assert!(read.take(row(Some("x"), None), 20).is_err());
-        assert_eq!((read.rows, read.bytes), (4, 21));
+        assert_eq!((read.rows, read.bytes), (1, LOG_ROW_COST + 14));
+        read.take(row(None, None), budget).unwrap();
+        assert_eq!((read.rows, read.bytes), (2, 2 * LOG_ROW_COST + 14), "a truncate costs a row");
+        read.take(row(None, Some("{\"bb\"}")), budget).unwrap();
+        assert_eq!((read.rows, read.bytes), (3, budget), "exactly the budget still fits");
+        assert!(read.take(row(None, None), budget).is_err(), "a row without text passes it too");
+        assert_eq!((read.rows, read.bytes), (4, budget + LOG_ROW_COST));
     }
 
     #[test]
