@@ -23,7 +23,7 @@ fn refuses_to_boot(manifest: &str, error: &str) {
 
 #[test]
 #[ignore = "needs Docker and `docker buildx bake`"]
-fn a_world_boots_stops_on_sigterm_and_boots_again_from_a_fresh_run_dir() {
+fn a_world_boots_stops_on_sigterm_and_refuses_to_boot_again() {
     let world = World::boot();
     let logs = world.logs();
     let line = logs.lines().find(|line| line.contains("booted in ")).unwrap_or_else(|| {
@@ -34,18 +34,17 @@ fn a_world_boots_stops_on_sigterm_and_boots_again_from_a_fresh_run_dir() {
     assert_eq!(names, ["datastores", "shift", "apps", "quiet"], "{line}");
     let modes = world.exec_ok(&["stat", "-c", "%a %U", "/miroir", "/miroir/run"]);
     assert_eq!(modes, "700 root\n700 root");
-    world.exec_ok(&["touch", "/miroir/run/stale"]);
     let stopping = Instant::now();
     docker_ok(&["stop", "--time", "30", world.id()]);
     assert!(stopping.elapsed() < Duration::from_secs(20), "the processes outlived SIGTERM");
     assert_eq!(world.wait_exit(), 0, "{}", world.logs());
     assert!(world.logs().contains("SIGTERM: stopping the world"), "{}", world.logs());
+    // A second boot would shift the dates again, over the first run's changes.
     world.start();
-    world.wait_ready();
-    let listing = world.exec_ok(&["ls", "-A", "/miroir/run"]);
-    let files: Vec<&str> = listing.lines().collect();
-    let fresh = files.contains(&"ready") && files.contains(&"catalog.json");
-    assert!(fresh && !files.contains(&"stale"), "{listing}");
+    assert_eq!(world.wait_exit(), 1, "{}", world.logs());
+    let logs = world.logs();
+    assert!(logs.contains("boot step 2, /miroir/run: this container booted before"), "{logs}");
+    assert_eq!(logs.matches("booted in ").count(), 1, "{logs}");
 }
 
 #[test]
