@@ -290,7 +290,9 @@ what start-up sent.
 Products do work in the background: a queued email, a webhook delivery, a search index. `quiet`
 is a command that exits 0 when that work is done. Miroir waits until it passes twice in a row,
 within 30 s, at bake, at boot and at collect, so the evidence holds what the agent's requests
-set off. At bake and boot a timeout fails; at collect it is a `quiet_timeout` fault.
+set off. At bake and boot a timeout fails; at collect it is a `quiet_timeout` fault. Miroir reads
+the command's stderr to explain a failure, so the command must not leave a background process
+holding its output open: that run waits out the 30 s.
 
 The fixture checks two Redis queue lengths; Gitea runs
 `gitea manager flush-queues`. Turn schedulers and cron off in `env`

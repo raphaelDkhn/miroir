@@ -268,7 +268,11 @@ impl Supervisor {
                 described(output.status),
                 last_line(&output.stderr)
             ))),
-            Ok(None) => Ok(Some("its last run was killed at the limit".into())),
+            Ok(None) => Ok(Some(
+                "its last run was killed at the limit, still running or leaving a background \
+                 process that holds its output open"
+                    .into(),
+            )),
         }
     }
 
@@ -811,8 +815,9 @@ mod tests {
         assert_eq!(
             message,
             "the quiet command `sleep 30` did not pass twice in a row within 1 s (its last run \
-             was killed at the limit): the world's background work never settled; check the \
-             command and the processes' output above"
+             was killed at the limit, still running or leaving a background process that holds \
+             its output open): the world's background work never settled; check the command \
+             and the processes' output above"
         );
     }
 
