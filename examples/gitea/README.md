@@ -99,7 +99,7 @@ Each task's agent acts as the world's engineering manager, through Gitea's REST 
 ```bash
 alias miroir='docker run --rm -v "$PWD:$PWD" -w "$PWD" miroir:dev miroir'
 miroir check --tasks examples/gitea/datasets                   # static checks
-docker compose config --help | grep -q -- --no-env-resolution  # else lint skips the images
+docker compose config --help | grep -q -- --no-env-resolution  # lint needs Compose 2.35+
 harbor lint examples/gitea/datasets/*/*/
 harbor run -c examples/gitea/check.yaml -n 8 --job-name gitea-gate
 miroir check --tasks examples/gitea/datasets jobs/gitea-gate
@@ -172,19 +172,53 @@ subtract it in the trainer (`reward - λ·harm`); the tasks never do.
 
 ## Results
 
-| Claim                                                               | Evidence          |
-| ------------------------------------------------------------------- | ----------------- |
-| The grader is right: 120 reference runs, 120 idle runs, 300 probes  | not yet run       |
-| A world boots fast enough for a cloud sandbox (`booted in …`)       | not yet measured  |
-| World image size                                                    | not yet measured  |
-| A frontier agent on the test split: reward, harm rate, pass^4       | not yet run       |
-| Training on the train split improves held-out work                  | open: not yet run |
+Measured on 2026-11-18 with the images built from this repository, on a Mac with Docker Desktop
+27.4 (12 CPUs and 8 GB of memory for its VM) and Harbor 0.26.0. Other builds and test runs
+shared the machine during the validation and determinism jobs; the boots and the one-at-a-time
+trials ran on an idle Docker VM.
+
+| Claim                                                         | Evidence                        |
+| ------------------------------------------------------------- | ------------------------------- |
+| The grader is right: 120 reference, 120 idle, 300 probe runs  | all pass, no voids or errors    |
+| The same run scores the same every time                       | 3 reference runs per task agree |
+| A world boots in seconds                                      | 4.5 to 7.6 s locally            |
+| World image size                                              | 382 MB, 114 MB compressed       |
+| A world boots within a cloud sandbox's 120 s                  | not yet run                     |
+| A frontier agent on the test split: reward, harm rate, pass^4 | not yet run                     |
+| Training on the train split improves held-out work            | open: not yet run               |
+
+- **The grader.** `harbor run -c examples/gitea/check.yaml -n 8` ran 720 trials in 42 min 13 s:
+  every task with its reference solution, with `nop`, and with `SOLUTION=1` to `4`; 180 of those
+  probe slots are past a task's probe count, and `miroir check` skips them. The reference
+  solution scored reward 1 and harm 0 on 120 of 120 tasks, doing nothing 0 and 0 on 120 of 120,
+  and 300 of 300 probes stayed within their bounds with the harm they declare. `miroir check`
+  found 0 violations, 0 voids and 0 check errors. The Docker VM used at most 3.8 GB of memory.
+- **Determinism.** The oracle alone with `-k 2` ran 240 trials in 10 min 27 s, all at reward 1
+  and harm 0. `miroir check` over both jobs held each task's three reference runs to one reward
+  and harm, with 0 violations.
+- **Boot.** `docker run --rm gitea-env:<world>`, twice per world: `booted in` 7.6 and 4.5 s
+  (orbit), 5.1 and 6.2 s (ferry), 6.0 and 4.7 s (kestrel). Starting Gitea took 2.1 to 3.6 s of
+  it, and waiting for its queues 1.7 to 3.4 s.
+- **Images.** Each world image is 381 to 382 MB, and 114 MB as `docker save | gzip`. The three
+  share every layer but their baked world, 66 MB. Baking a world (`RUN miroir bake`) took 127 to
+  134 s. `miroir-main` is 251 MB (80 MB compressed) and `miroir` 23 MB (9 MB).
+- **Time per trial** (mean, then maximum). One at a time, the reference runs of ten tasks, one
+  per family, took 13.6 s (16.2 s): environment setup 7.0 s (9.4 s), agent 0.8 s (1.1 s), from
+  the agent's end to the verifier's start, which stops `main` and collects the evidence, 3.0 s
+  (3.6 s), and verifier 2.8 s (3.7 s). Over the validation job's 720 trials, 8 at a time on the
+  busy machine, a trial took 28.0 s (73.7 s): environment setup 15.7 s (47.0 s), agent 1.4 s
+  (16.1 s), collection 5.2 s (20.6 s), verifier 5.7 s (20.6 s).
+- **Not run yet.** A cloud sandbox trial (Daytona gives a compose project 120 s to pull its
+  images and boot), and a frontier agent on the test split, which spends API credit: both wait
+  for the project owner's approval. Whether training on the train split improves held-out work
+  stays open: testing it needs the recipe above run on GPUs, which is paid and also waits for the
+  project owner's approval.
 
 ## Limitations
 
 - The worlds are generated, not taken from production data. Miroir's docs show how to build a
   world from a production snapshot.
-- The tasks are short workflows of 1 to 20 API calls, not projects.
+- The tasks are short workflows, not projects: their reference solutions make 2 to 16 API calls.
 - Checks are SQL over what changed and what was sent. The quality of a comment is approximated:
   `close-stale` looks for the word "reopen".
 - Git refs and files are not graded: Miroir captures database rows, emails and webhook calls.
