@@ -96,6 +96,21 @@ fn a_process_that_exits_during_boot_fails_it_naming_the_process() {
     );
 }
 
+#[test]
+#[ignore = "needs Docker and `docker buildx bake`"]
+fn a_process_run_as_a_user_gets_its_home_unless_its_env_sets_one() {
+    let homes = r#"
+  - {name: home, command: [sh, -c, 'echo "home=$HOME"; exec sleep 600'], user: node}
+  - {name: pinned, command: [sh, -c, 'echo "pinned=$HOME"; exec sleep 600'], user: node,
+     env: {HOME: /app}}
+env:
+"#;
+    let world =
+        World::boot_with(&[("/miroir/miroir.yaml", &manifest_with("\nenv:\n", homes))], &[]);
+    world.wait_log("home=/home/node");
+    world.wait_log("pinned=/app");
+}
+
 /// Time columns of rows the seed planted, as numbers: seconds for timestamps and Unix times,
 /// days since 2000-01-01 for dates.
 const TIMES: &str = "\
