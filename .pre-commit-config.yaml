@@ -20,7 +20,7 @@ repos:
         files: ^\.github/workflows/
       - id: zizmor
         name: zizmor
-        entry: uvx zizmor==1.31.1 .github/workflows/
+        entry: uvx zizmor==1.32.0 .github/workflows/
         language: system
         files: ^\.github/workflows/
         pass_filenames: false
@@ -34,11 +34,18 @@ repos:
         entry: uvx ruff==0.17.3 format --check
         language: system
         types: [python]
+      # As in CI: a real environment with the world image's Python 3.12, which ty resolves
+      # imports from.
       - id: ty
         name: ty
-        entry: uv run --locked --directory python ty check
+        entry: >-
+          sh -c 'uv venv -q --allow-existing --python 3.12 .venv-examples
+          && uv pip install -q --python .venv-examples pyyaml==6.0.3 pytest==9.2.0
+          && uvx ty==0.0.96 check --error-on-warning --python .venv-examples
+          --extra-search-path examples/gitea/seed examples/gitea'
         language: system
-        files: ^python/
+        files: ^examples/gitea/
+        types: [python]
         pass_filenames: false
       - id: shellcheck
         name: shellcheck
@@ -47,7 +54,7 @@ repos:
         types: [shell]
       - id: shfmt
         name: shfmt
-        entry: shfmt -d
+        entry: shfmt -i 2 -d
         language: system
         types: [shell]
       - id: agentskills

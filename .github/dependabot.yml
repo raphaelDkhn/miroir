@@ -18,23 +18,16 @@ updates:
     groups:
       actions:
         patterns: ["*"]
-  - package-ecosystem: uv
-    directory: /tests/openenv
+  # Dependabot reads FROM lines only, so the Gitea image pinned in an ARG of
+  # examples/gitea/Dockerfile.miroir is not among these.
+  - package-ecosystem: docker
+    directories: [/, /fixtures/acme-crm]
     schedule:
       interval: weekly
     cooldown:
       default-days: 7
     groups:
-      openenv:
-        patterns: ["*"]
-  - package-ecosystem: uv
-    directory: /python
-    schedule:
-      interval: weekly
-    cooldown:
-      default-days: 7
-    groups:
-      python:
+      docker:
         patterns: ["*"]
   - package-ecosystem: npm
     directory: /fixtures/acme-crm
@@ -44,13 +37,4 @@ updates:
       default-days: 7
     groups:
       acme-crm:
-        patterns: ["*"]
-  - package-ecosystem: npm
-    directory: /fixtures/mini-shop
-    schedule:
-      interval: weekly
-    cooldown:
-      default-days: 7
-    groups:
-      mini-shop:
         patterns: ["*"]
