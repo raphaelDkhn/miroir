@@ -52,8 +52,8 @@ fn a_world_boots_stops_on_sigterm_and_refuses_to_boot_again() {
 fn sigterm_while_the_world_boots_stops_every_process_it_started() {
     let world = World::create(&[], &[]);
     world.start();
-    // By the first process, `miroir run` handles SIGTERM, which would otherwise kill it.
-    world.wait_log("started process=db");
+    // Postgres handles SIGTERM once it logs its start: earlier, SIGTERM kills it silently.
+    world.wait_log("starting PostgreSQL");
     let stopping = Instant::now();
     docker_ok(&["stop", "--time", "30", world.id()]);
     assert!(stopping.elapsed() < Duration::from_secs(20), "the processes outlived SIGTERM");
